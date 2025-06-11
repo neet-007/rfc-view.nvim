@@ -1,5 +1,7 @@
 local M = {}
 
+local buf_close = false
+
 local active_watchers = {}
 
 --- Setup buffer change listener with debouncing
@@ -95,6 +97,7 @@ local function store_original_mappings()
 	original_mappings.n = vim.fn.maparg("n", "n") or false
 	original_mappings.b = vim.fn.maparg("b", "n") or false
 	original_mappings.v = vim.fn.maparg("v", "n") or false
+	original_mappings["<CR>"] = vim.fn.maparg("<CR>", "n") or false
 end
 
 local function restore_original_mappings()
@@ -172,6 +175,7 @@ M.setup = function()
 end
 
 M.open_rfc = function()
+	buf_close = false
 	store_original_mappings()
 
 	local window_config = create_window_configurations()
@@ -187,9 +191,26 @@ M.open_rfc = function()
 
 	foreach_float(function(_, float)
 		vim.bo[float.buf].filetype = "markdown"
+		vim.api.nvim_create_autocmd("BufDelete", {
+			buffer = float.buf,
+			callback = function()
+				print("closed ", float.buf)
+				buf_close = true
+			end,
+		})
 	end)
 
 	vim.keymap.set("n", "m", function()
+		if
+			not vim.api.nvim_win_is_valid(state.curr_float.win)
+			or (state.curr_header ~= nil and not vim.api.nvim_win_is_valid(state.curr_header.win))
+			or not vim.api.nvim_win_is_valid(state.floats.view.win)
+		then
+			vim.api.nvim_echo({ { "invalid state", "Error" } }, true, {})
+			M.close_rfc()
+			return
+		end
+
 		vim.api.nvim_win_set_config(state.curr_float.win, { zindex = 1 })
 		if state.curr_header ~= nil then
 			vim.api.nvim_win_set_config(state.curr_header.win, { zindex = 1 })
@@ -208,6 +229,16 @@ M.open_rfc = function()
 	})
 
 	vim.keymap.set("n", "n", function()
+		if
+			not vim.api.nvim_win_is_valid(state.curr_float.win)
+			or (state.curr_header ~= nil and not vim.api.nvim_win_is_valid(state.curr_header.win))
+			or not vim.api.nvim_win_is_valid(state.floats.list.win)
+		then
+			vim.api.nvim_echo({ { "invalid state", "Error" } }, true, {})
+			M.close_rfc()
+			return
+		end
+
 		vim.api.nvim_win_set_config(state.curr_float.win, { zindex = 1 })
 		if state.curr_header ~= nil then
 			vim.api.nvim_win_set_config(state.curr_header.win, { zindex = 1 })
@@ -232,6 +263,17 @@ M.open_rfc = function()
 	})
 
 	vim.keymap.set("n", "b", function()
+		if
+			not vim.api.nvim_win_is_valid(state.curr_float.win)
+			or (state.curr_header ~= nil and not vim.api.nvim_win_is_valid(state.curr_header.win))
+			or not vim.api.nvim_win_is_valid(state.floats.search.win)
+			or not vim.api.nvim_win_is_valid(state.floats.search_header.win)
+		then
+			vim.api.nvim_echo({ { "invalid state", "Error" } }, true, {})
+			M.close_rfc()
+			return
+		end
+
 		vim.api.nvim_win_set_config(state.curr_float.win, { zindex = 1 })
 		if state.curr_header ~= nil then
 			vim.api.nvim_win_set_config(state.curr_header.win, { zindex = 1 })
@@ -255,6 +297,16 @@ M.open_rfc = function()
 	})
 
 	vim.keymap.set("n", "v", function()
+		if
+			not vim.api.nvim_win_is_valid(state.curr_float.win)
+			or (state.curr_header ~= nil and not vim.api.nvim_win_is_valid(state.curr_header.win))
+			or not vim.api.nvim_win_is_valid(state.floats.search_header.win)
+		then
+			vim.api.nvim_echo({ { "invalid state", "Error" } }, true, {})
+			M.close_rfc()
+			return
+		end
+
 		vim.api.nvim_win_set_config(state.curr_float.win, { zindex = 1 })
 		if state.curr_header ~= nil then
 			vim.api.nvim_win_set_config(state.curr_header.win, { zindex = 1 })
@@ -266,15 +318,12 @@ M.open_rfc = function()
 
 		watch_buffer_changes(state.curr_header.buf, function(buf)
 			local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-			print("tyeee ", state.curr_float.type)
 			if state.curr_float.type == "list" then
 				data.list_data = run_go_plugin("list", table.concat(lines))
 				vim.api.nvim_buf_set_lines(state.curr_float.buf, 1, -1, false, data.list_data)
 			elseif state.curr_float.type == "search" then
 				print("search")
 				data.search_data = run_go_plugin("rfc", table.concat(lines))
-				print("search ", table.concat(lines))
-				print("search ", table.concat(data.search_data))
 				vim.api.nvim_buf_set_lines(state.curr_float.buf, 1, -1, false, data.search_data)
 			end
 		end, {
@@ -283,6 +332,32 @@ M.open_rfc = function()
 				print("Stopped watching buffer", buf)
 			end,
 		})
+	end, {
+		noremap = true, -- Non-recursive
+		silent = true, -- No command echo
+	})
+
+	vim.keymap.set("n", "<CR>", function()
+		if not vim.api.nvim_win_is_valid(state.curr_float.win) then
+			vim.api.nvim_echo({ { "invalid state", "Error" } }, true, {})
+			M.close_rfc()
+			return
+		end
+
+		local cursor_info = vim.api.nvim_win_get_cursor(state.curr_float.win)
+		if state.curr_float.type == "list" then
+			if cursor_info[1] < 3 then
+				print("less than 3")
+			else
+				print("list")
+			end
+		elseif state.curr_float.type == "search" then
+			if cursor_info[1] < 3 then
+				print("less than 3")
+			else
+				print("search")
+			end
+		end
 	end, {
 		noremap = true, -- Non-recursive
 		silent = true, -- No command echo
@@ -300,6 +375,40 @@ M.close_rfc = function()
 			vim.api.nvim_buf_delete(float.buf, { force = true })
 		end
 	end)
+end
+
+M.print_buffers = function()
+	-- Get a list of all buffer IDs
+	local buffer_ids = vim.api.nvim_list_bufs()
+
+	print("--- All Buffers (including unlisted) ---")
+	for _, buf_id in ipairs(buffer_ids) do
+		-- Check if the buffer is valid (not deleted)
+		if vim.api.nvim_buf_is_valid(buf_id) then
+			local buf_name = vim.api.nvim_buf_get_name(buf_id)
+			local is_loaded = vim.api.nvim_buf_is_loaded(buf_id)
+			local is_listed = vim.api.nvim_buf_get_option(buf_id, "buflisted")
+
+			local status = ""
+			if not is_loaded then
+				status = status .. "[Unloaded]"
+			end
+			if not is_listed then
+				status = status .. "[Unlisted]"
+			end
+
+			print(string.format("ID: %s, Name: '%s' %s", buf_id, buf_name, status))
+		end
+	end
+
+	print("\n--- Only Listed Buffers ---")
+	-- Filter for only 'listed' buffers (like what :ls shows by default)
+	for _, buf_id in ipairs(buffer_ids) do
+		if vim.api.nvim_buf_is_valid(buf_id) and vim.api.nvim_buf_get_option(buf_id, "buflisted") then
+			local buf_name = vim.api.nvim_buf_get_name(buf_id)
+			print(string.format("ID: %s, Name: '%s'", buf_id, buf_name))
+		end
+	end
 end
 
 return M
