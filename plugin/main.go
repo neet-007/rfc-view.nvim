@@ -150,6 +150,27 @@ func listRfc() {
 
 	scanner := bufio.NewScanner(file)
 
+	lineCount := 0
+	scanner1 := bufio.NewScanner(file)
+
+	for scanner1.Scan() {
+		lineCount++ // Just count, don't print yet
+	}
+
+	if err := scanner1.Err(); err != nil {
+		fmt.Println("Error reading file for count:", err)
+		return
+	}
+
+	fmt.Printf("Total line count: %d\n", lineCount)
+
+	_, err = file.Seek(0, io.SeekStart)
+	if err != nil {
+		fmt.Println("Error seeking file to beginning:", err)
+		return
+	}
+
+	scanner = bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := scanner.Text()
 		fmt.Println(line)
@@ -222,8 +243,7 @@ func main() {
 
 	fmt.Printf("total count: %d\n", rfcs.Meta.TotalCount)
 	for _, rfc := range rfcs.Objects {
-		fmt.Printf("name %s\n", rfc.Name)
-		fmt.Printf("title %s\n", rfc.Title)
+		fmt.Printf("name %s, title %s\n", rfc.Name, rfc.Title)
 		if *rfcSave {
 			getRfc(rfc, *rfcSave)
 		}
