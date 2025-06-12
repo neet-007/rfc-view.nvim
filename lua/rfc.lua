@@ -1,6 +1,18 @@
 local M = {}
 
-local buf_close = false
+vim.keymap.set("n", "<Leader>rl", function()
+	package.loaded["rfc"] = nil
+	require("rfc")
+end, { desc = "reload packages" })
+vim.keymap.set("n", "<Leader>ro", function()
+	M.open_rfc()
+end, { desc = "open rfc" })
+vim.keymap.set("n", "<Leader>rc", function()
+	M.close_rfc()
+end, { desc = "close_rfc" })
+vim.keymap.set("n", "<Leader>rb", function()
+	M.print_buffers()
+end, { desc = "print buffers" })
 
 local active_watchers = {}
 
@@ -136,7 +148,7 @@ local function create_floating_window(config, enter)
 	local buf = vim.api.nvim_create_buf(false, true) -- No file, scratch buffer
 	local win = vim.api.nvim_open_win(buf, enter or false, config)
 
-	return { buf = buf, win = win }
+	return { buf = buf, win = win, config = config }
 end
 
 local create_window_configurations = function()
@@ -170,32 +182,41 @@ local create_window_configurations = function()
 	}
 end
 
+local change_buffer_content = function(buf, lines)
+	vim.api.nvim_set_option_value("readonly", false, { buf = buf, scope = "local" })
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+	vim.api.nvim_set_option_value("readonly", true, { buf = buf, scope = "local" })
+end
+
 M.setup = function()
 	-- nothing
 end
 
 M.open_rfc = function()
-	buf_close = false
 	store_original_mappings()
 
 	local window_config = create_window_configurations()
 
-	state.floats.list = create_floating_window(window_config.view, true)
 	state.floats.view = create_floating_window(window_config.view, true)
-	state.floats.search = create_floating_window(window_config.view, true)
+	state.floats.list = create_floating_window(window_config.view, false)
+	state.floats.search = create_floating_window(window_config.view, false)
 	state.floats.search_header = create_floating_window(window_config.search, true)
 
-	state.curr_float = state.floats.list
+	state.curr_float = state.floats.view
 	state.curr_float.type = "list"
 	state.curr_header = nil
 
-	foreach_float(function(_, float)
+	change_buffer_content(state.floats.view.buf, { "nothing to view" })
+	foreach_float(function(name, float)
 		vim.bo[float.buf].filetype = "markdown"
-		vim.api.nvim_create_autocmd("BufDelete", {
+		vim.api.nvim_buf_set_name(float.buf, name)
+		if name ~= "search_header" then
+			vim.api.nvim_set_option_value("readonly", true, { buf = float.buf, scope = "local" })
+		end
+		vim.api.nvim_create_autocmd("WinClosed", {
 			buffer = float.buf,
 			callback = function()
-				print("closed ", float.buf)
-				buf_close = true
+				M.close_rfc()
 			end,
 		})
 	end)
@@ -204,9 +225,17 @@ M.open_rfc = function()
 		if
 			not vim.api.nvim_win_is_valid(state.curr_float.win)
 			or (state.curr_header ~= nil and not vim.api.nvim_win_is_valid(state.curr_header.win))
-			or not vim.api.nvim_win_is_valid(state.floats.view.win)
 		then
-			vim.api.nvim_echo({ { "invalid state", "Error" } }, true, {})
+			vim.api.nvim_echo({
+				{
+					string.format(
+						"invalid state view %s %s",
+						vim.api.nvim_win_is_valid(state.curr_float.win),
+						(state.curr_header ~= nil and not vim.api.nvim_win_is_valid(state.curr_header.win))
+					),
+					"Error",
+				},
+			}, true, {})
 			M.close_rfc()
 			return
 		end
@@ -222,7 +251,7 @@ M.open_rfc = function()
 		state.curr_float.type = "view"
 		state.curr_header = nil
 
-		vim.api.nvim_buf_set_lines(state.curr_float.buf, 1, -1, false, { "nothing to view" })
+		change_buffer_content(state.curr_float.buf, { "nothing to view" })
 	end, {
 		noremap = true, -- Non-recursive
 		silent = true, -- No command echo
@@ -232,9 +261,8 @@ M.open_rfc = function()
 		if
 			not vim.api.nvim_win_is_valid(state.curr_float.win)
 			or (state.curr_header ~= nil and not vim.api.nvim_win_is_valid(state.curr_header.win))
-			or not vim.api.nvim_win_is_valid(state.floats.list.win)
 		then
-			vim.api.nvim_echo({ { "invalid state", "Error" } }, true, {})
+			vim.api.nvim_echo({ { "invalid state list", "Error" } }, true, {})
 			M.close_rfc()
 			return
 		end
@@ -253,10 +281,10 @@ M.open_rfc = function()
 		if #data.list_data == 0 then
 			data.list_data = run_go_plugin("list", "")
 		else
-			vim.api.nvim_buf_set_lines(state.curr_float.buf, 1, -1, false, data.list_data)
+			change_buffer_content(state.curr_float.buf, data.list_data)
 		end
 
-		vim.api.nvim_buf_set_lines(state.curr_float.buf, 1, -1, false, data.list_data)
+		change_buffer_content(state.curr_float.buf, data.list_data)
 	end, {
 		noremap = true, -- Non-recursive
 		silent = true, -- No command echo
@@ -266,10 +294,8 @@ M.open_rfc = function()
 		if
 			not vim.api.nvim_win_is_valid(state.curr_float.win)
 			or (state.curr_header ~= nil and not vim.api.nvim_win_is_valid(state.curr_header.win))
-			or not vim.api.nvim_win_is_valid(state.floats.search.win)
-			or not vim.api.nvim_win_is_valid(state.floats.search_header.win)
 		then
-			vim.api.nvim_echo({ { "invalid state", "Error" } }, true, {})
+			vim.api.nvim_echo({ { "invalid state search", "Error" } }, true, {})
 			M.close_rfc()
 			return
 		end
@@ -287,9 +313,9 @@ M.open_rfc = function()
 		state.curr_header = state.floats.search_header
 
 		if #data.search_data == 0 then
-			vim.api.nvim_buf_set_lines(state.curr_float.buf, 1, -1, false, { "empty search" })
+			change_buffer_content(state.curr_float.buf, { "empty search" })
 		else
-			vim.api.nvim_buf_set_lines(state.curr_float.buf, 1, -1, false, data.search_data)
+			change_buffer_content(state.curr_float.buf, data.search_data)
 		end
 	end, {
 		noremap = true, -- Non-recursive
@@ -300,9 +326,8 @@ M.open_rfc = function()
 		if
 			not vim.api.nvim_win_is_valid(state.curr_float.win)
 			or (state.curr_header ~= nil and not vim.api.nvim_win_is_valid(state.curr_header.win))
-			or not vim.api.nvim_win_is_valid(state.floats.search_header.win)
 		then
-			vim.api.nvim_echo({ { "invalid state", "Error" } }, true, {})
+			vim.api.nvim_echo({ { "invalid state search header", "Error" } }, true, {})
 			M.close_rfc()
 			return
 		end
@@ -320,11 +345,11 @@ M.open_rfc = function()
 			local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
 			if state.curr_float.type == "list" then
 				data.list_data = run_go_plugin("list", table.concat(lines))
-				vim.api.nvim_buf_set_lines(state.curr_float.buf, 1, -1, false, data.list_data)
+				change_buffer_content(state.curr_float.buf, data.list_data)
 			elseif state.curr_float.type == "search" then
 				print("search")
 				data.search_data = run_go_plugin("rfc", table.concat(lines))
-				vim.api.nvim_buf_set_lines(state.curr_float.buf, 1, -1, false, data.search_data)
+				change_buffer_content(state.curr_float.buf, data.search_data)
 			end
 		end, {
 			debounce_ms = 500, -- Only trigger after 500ms of no changes
@@ -369,7 +394,7 @@ M.close_rfc = function()
 
 	foreach_float(function(_, float)
 		if float.win and vim.api.nvim_win_is_valid(float.win) then
-			vim.api.nvim_win_close(float.win, { force = true })
+			vim.api.nvim_win_close(float.win, true)
 		end
 		if float.buf and vim.api.nvim_buf_is_valid(float.buf) then
 			vim.api.nvim_buf_delete(float.buf, { force = true })
