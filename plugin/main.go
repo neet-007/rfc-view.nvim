@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type RFC struct {
@@ -114,15 +115,18 @@ func searchRFCs(query string) (*RFCResponse, error) {
 	return &result, nil
 }
 
-func getRfc(rfc RFC, save bool) (int, error) {
-	url := "https://www.rfc-editor.org/rfc/" + rfc.Name + ".txt"
+func getRfc(name string, save bool) (int, error) {
+	if !strings.Contains(name, "::") {
+		return 0, fmt.Errorf("invalid name %s must contain RFC::TITLE", name)
+	}
+
+	url := "https://www.rfc-editor.org/rfc/" + strings.Split(name, "::")[0] + ".txt"
 	res, err := http.Get(url)
 	if err != nil {
 		return 0, err
 	}
 	defer res.Body.Close()
 
-	//fmt.Printf("length %d\n", res.ContentLength)
 	var buf bytes.Buffer
 	_, err = io.Copy(&buf, res.Body)
 	if err != nil {
@@ -130,10 +134,9 @@ func getRfc(rfc RFC, save bool) (int, error) {
 	}
 
 	body := buf.Bytes()
-	//fmt.Printf("Body (%d bytes): %s\n", len(body), body[:100])
 
 	if save {
-		return writeToRfc("rfc"+rfc.Name, body)
+		return writeToRfc(name, body)
 	}
 
 	return 0, nil
@@ -206,6 +209,66 @@ func viewRfc(name string) error {
 	return nil
 }
 
+func deleteRfc(name string) error {
+	path := filepath.Join(getRfcDir(), name)
+	err := os.Remove(path + ".txt.gz")
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return err
+		}
+	}
+
+	rfcListPath := filepath.Join(getRfcDir(), "rfc_list") + ".txt"
+	tempRfcListPath := filepath.Join(getRfcDir(), "rfc_list_temp") + ".txt"
+
+	file, err := os.Open(rfcListPath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	var linesToKeep []string
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == name {
+			continue
+		}
+		linesToKeep = append(linesToKeep, line)
+	}
+
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+
+	tempFile, err := os.Create(tempRfcListPath)
+	if err != nil {
+		return err
+	}
+	defer tempFile.Close()
+
+	writer := bufio.NewWriter(tempFile)
+	for _, line := range linesToKeep {
+		_, err := writer.WriteString(line + "\n")
+		if err != nil {
+			return err
+		}
+	}
+	writer.Flush()
+
+	err = os.Remove(rfcListPath)
+	if err != nil {
+		return err
+	}
+
+	err = os.Rename(tempRfcListPath, rfcListPath)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func main() {
 	err := initRfc()
 	if err != nil {
@@ -216,11 +279,33 @@ func main() {
 	rfcSave := flag.Bool("save", false, "save rfc")
 	rfcList := flag.Bool("list", false, "view rfc list")
 	rfcView := flag.String("view", "", "view rfc")
+	rfcGet := flag.String("get", "", "get rfc")
+	rfcDelete := flag.String("delete", "", "delete rfc")
 
 	flag.Parse()
 
 	if *rfcList {
 		listRfc()
+		return
+	}
+
+	if *rfcDelete != "" {
+		if err := deleteRfc(*rfcDelete); err != nil {
+			log.Fatal(err)
+		}
+
+		return
+	}
+
+	if *rfcGet != "" {
+		if _, err := getRfc(*rfcGet, true); err != nil {
+			log.Fatal(err)
+		}
+
+		if err := viewRfc(*rfcGet); err != nil {
+			log.Fatal(err)
+		}
+
 		return
 	}
 
@@ -243,9 +328,9 @@ func main() {
 
 	fmt.Printf("total count: %d\n", rfcs.Meta.TotalCount)
 	for _, rfc := range rfcs.Objects {
-		fmt.Printf("name %s, title %s\n", rfc.Name, rfc.Title)
+		fmt.Printf("%s::%s\n", rfc.Name, rfc.Title)
 		if *rfcSave {
-			getRfc(rfc, *rfcSave)
+			getRfc(fmt.Sprintf("%s::%s", rfc.Name, rfc.Title), *rfcSave)
 		}
 	}
 }

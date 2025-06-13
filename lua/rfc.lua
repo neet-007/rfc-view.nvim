@@ -72,7 +72,7 @@ local watch_buffer_changes = function(buf_id, callback, opts)
 	}
 end
 
---- @alias PluginCommands "rfc" | "save" | "list" | "view"
+--- @alias PluginCommands "rfc" | "save" | "list" | "view" | "get" | "delete"
 
 --- @param command PluginCommands
 --- @param args string
@@ -97,31 +97,42 @@ local state = {
 }
 
 local data = {
-	list_data = {},
-	view_data = {},
-	search_data = {},
+	list_data = { "nothing to list" },
+	view_data = { "nothing to view" },
+	curr_view = "__NONE__",
+	search_data = { "nothing to search" },
 	view_list = {},
 }
 
 local original_mappings = {}
 
+local keys_to_store = { "m", "n", "b", "v", "<CR>", "s", "d" }
+
 local function store_original_mappings()
-	original_mappings.m = vim.fn.maparg("m", "n") or false
-	original_mappings.n = vim.fn.maparg("n", "n") or false
-	original_mappings.b = vim.fn.maparg("b", "n") or false
-	original_mappings.v = vim.fn.maparg("v", "n") or false
-	original_mappings["<CR>"] = vim.fn.maparg("<CR>", "n") or false
-	original_mappings.s = vim.fn.maparg("s", "n") or false
+	original_mappings = {}
+	for _, map in ipairs(vim.api.nvim_get_keymap("n")) do
+		if vim.tbl_contains(keys_to_store, map.lhs) then
+			original_mappings[map.lhs] = map
+		end
+	end
 end
 
 local function restore_original_mappings()
-	for key, mapping in pairs(original_mappings) do
-		if mapping == false then
-			-- No original mapping existed, so delete ours
+	for _, key in ipairs(keys_to_store) do
+		local map = original_mappings[key]
+
+		if not map then
 			pcall(vim.keymap.del, "n", key)
 		else
-			-- Restore the original mapping
-			vim.keymap.set("n", key, mapping, { noremap = mapping.noremap, silent = true })
+			local rhs = map.callback or map.rhs
+			local opts = {
+				noremap = map.noremap,
+				silent = map.silent == 1,
+				expr = map.expr == 1,
+				nowait = map.nowait == 1,
+			}
+
+			vim.keymap.set("n", key, rhs, opts)
 		end
 	end
 end
@@ -222,10 +233,10 @@ M.open_rfc = function()
 	state.curr_float.type = "list"
 	state.curr_header = nil
 
-	if #data.view_data == 0 then
-		change_buffer_content(state.floats.view, { "nothing to view" })
+	if data.curr_view ~= "__NONE__" then
+		change_buffer_content(state.curr_float, data.view_list[data.curr_view])
 	else
-		change_buffer_content(state.floats.view, data.view_data)
+		change_buffer_content(state.curr_float, { "no current view" })
 	end
 
 	foreach_float(function(name, float)
@@ -273,10 +284,10 @@ M.open_rfc = function()
 		state.curr_float.type = "view"
 		state.curr_header = nil
 
-		if #data.view_data == 0 then
-			change_buffer_content(state.curr_float, { "nothing to view" })
+		if data.curr_view ~= "__NONE__" then
+			change_buffer_content(state.curr_float, data.view_list[data.curr_view])
 		else
-			change_buffer_content(state.curr_float, data.view_data)
+			change_buffer_content(state.curr_float, { "no current view" })
 		end
 	end, {
 		noremap = true, -- Non-recursive
@@ -304,9 +315,7 @@ M.open_rfc = function()
 		state.curr_float.type = "list"
 		state.curr_header = nil
 
-		if #data.list_data == 0 then
-			data.list_data = run_go_plugin("list", "")
-		end
+		data.list_data = run_go_plugin("list", "")
 
 		change_buffer_content(state.curr_float, data.list_data)
 	end, {
@@ -336,11 +345,7 @@ M.open_rfc = function()
 		state.curr_float.type = "search"
 		state.curr_header = state.floats.search_header
 
-		if #data.search_data == 0 then
-			change_buffer_content(state.curr_float, { "empty search" })
-		else
-			change_buffer_content(state.curr_float, data.search_data)
-		end
+		change_buffer_content(state.curr_float, data.search_data)
 	end, {
 		noremap = true, -- Non-recursive
 		silent = true, -- No command echo
@@ -395,6 +400,7 @@ M.open_rfc = function()
 
 		local cursor_info = vim.api.nvim_win_get_cursor(state.curr_float.win)
 		if state.curr_float.type == "list" or state.curr_float.type == "view_list" then
+			-- TODO: dont make anything for nothing to view here for view_list
 			if cursor_info[1] < 2 then
 				print("less than 2")
 			else
@@ -405,19 +411,26 @@ M.open_rfc = function()
 				end
 
 				local lines = vim.api.nvim_buf_get_lines(state.curr_float.buf, 0, -1, false)
-				if cursor_info[1] < 2 then
-					print("less than 2")
-				else
-					local new_lines = run_go_plugin("view", lines[cursor_info[1]])
-					data.view_data = new_lines
-					data.view_list[lines[cursor_info[1]]] = new_lines
-				end
+				local new_lines = run_go_plugin("view", lines[cursor_info[1]])
+				--data.view_data = new_lines
+				data.curr_view = lines[cursor_info[1]]
+				data.view_list[lines[cursor_info[1]]] = new_lines
 			end
 		elseif state.curr_float.type == "search" then
 			if cursor_info[1] < 2 then
 				print("less than 2")
 			else
-				print("search")
+				if not vim.api.nvim_win_is_valid(state.curr_float.win) then
+					vim.api.nvim_echo({ { "invalid state", "Error" } }, true, {})
+					M.close_rfc()
+					return
+				end
+
+				local lines = vim.api.nvim_buf_get_lines(state.curr_float.buf, 0, -1, false)
+				local new_lines = run_go_plugin("get", lines[cursor_info[1]])
+				--data.view_data = new_lines
+				data.curr_view = lines[cursor_info[1]]
+				data.view_list[lines[cursor_info[1]]] = new_lines
 			end
 		end
 	end, {
@@ -442,6 +455,9 @@ M.open_rfc = function()
 			print("less than 2")
 		else
 			local new_lines = run_go_plugin("view", lines[cursor_info[1]])
+			if type(lines[cursor_info[1]]) ~= "string" then
+				print("NOT STRING NOT STRING", lines[cursor_info[1]])
+			end
 			data.view_list[lines[cursor_info[1]]] = new_lines
 		end
 	end, {
@@ -476,14 +492,53 @@ M.open_rfc = function()
 		end
 
 		if count == 0 then
-			data.view_list = { "no current views" }
-			change_buffer_content(state.curr_float, data.view_list)
+			change_buffer_content(state.curr_float, { "no current views" })
 		else
 			local new_lines = {}
 			for name, _ in pairs(data.view_list) do
+				if type(name) ~= "string" then
+					print("name not string ", name)
+				end
 				table.insert(new_lines, name)
 			end
 			change_buffer_content(state.curr_float, new_lines)
+		end
+	end, {
+		noremap = true, -- Non-recursive
+		silent = true, -- No command echo
+	})
+
+	vim.keymap.set("n", "d", function()
+		if
+			state.curr_float.type ~= "list"
+			and state.curr_float.type ~= "view_list"
+			and state.curr_float.type ~= "view"
+		then
+			return
+		end
+
+		if state.curr_float.type == "view" then
+			data.curr_view = "__NONE__"
+			return
+		end
+
+		if not vim.api.nvim_win_is_valid(state.curr_float.win) then
+			vim.api.nvim_echo({ { "invalid state", "Error" } }, true, {})
+			M.close_rfc()
+			return
+		end
+
+		local lines = vim.api.nvim_buf_get_lines(state.curr_float.buf, 0, -1, false)
+		local cursor_info = vim.api.nvim_win_get_cursor(state.curr_float.win)
+		if cursor_info[1] < 2 then
+			print("less than 2")
+		else
+			if state.curr_float.type == "list" then
+				run_go_plugin("delete", lines[cursor_info[1]])
+				data.list_data[lines[cursor_info[1]]] = nil
+			else
+				data.view_list[lines[cursor_info[1]]] = nil
+			end
 		end
 	end, {
 		noremap = true, -- Non-recursive
