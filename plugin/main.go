@@ -143,7 +143,7 @@ func getRfc(name string, save bool) (int, error) {
 	return 0, nil
 }
 
-func listRfc() {
+func listRfc(filter string) {
 	listPath := filepath.Join(getRfcDir(), "rfc_list") + ".txt"
 
 	file, err := os.Open(listPath)
@@ -158,7 +158,12 @@ func listRfc() {
 	scanner1 := bufio.NewScanner(file)
 
 	for scanner1.Scan() {
-		lineCount++ // Just count, don't print yet
+		line := scanner1.Text()
+		if filter == "" {
+			lineCount++ // Just count, don't print yet
+		} else if strings.Contains(strings.ToLower(strings.Split(line, "::")[1]), strings.ToLower(filter)) {
+			lineCount++ // Just count, don't print yet
+		}
 	}
 
 	if err := scanner1.Err(); err != nil {
@@ -177,7 +182,11 @@ func listRfc() {
 	scanner = bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := scanner.Text()
-		fmt.Println(line)
+		if filter == "" {
+			fmt.Println(line)
+		} else if strings.Contains(strings.ToLower(strings.Split(line, "::")[1]), strings.ToLower(filter)) {
+			fmt.Println(line)
+		}
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -279,6 +288,7 @@ func main() {
 	rfcSearch := flag.String("rfc", "", "rfc name")
 	rfcSave := flag.Bool("save", false, "save rfc")
 	rfcList := flag.Bool("list", false, "view rfc list")
+	rfcListFilter := flag.String("filter", "", "filter rfc list")
 	rfcView := flag.String("view", "", "view rfc")
 	rfcGet := flag.String("get", "", "get rfc")
 	rfcDelete := flag.String("delete", "", "delete rfc")
@@ -286,7 +296,7 @@ func main() {
 	flag.Parse()
 
 	if *rfcList {
-		listRfc()
+		listRfc(*rfcListFilter)
 		return
 	}
 

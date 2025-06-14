@@ -72,25 +72,29 @@ local watch_buffer_changes = function(buf_id, callback, opts)
 	}
 end
 
---- @alias PluginCommands "rfc" | "save" | "list" | "view" | "get" | "delete"
+--- @alias PluginCommands "rfc" | "save" | "list" | "view" | "get" | "delete" | "filter"
 
---- @param command PluginCommands
---- @param args string
---- @return string[]
-local run_go_plugin = function(command, args)
+--- @param commands PluginCommands[]
+--- @param args (string|nil)[] # arguments for each flag, same order, nil to skip
+--- @return string[] # stdout lines
+local run_go_plugin = function(commands, args)
 	local binary_path = vim.fn.expand("~/personal/rfc_plugin.nvim/plugin/main")
-	local result = vim.system({
-		binary_path,
-		"--" .. command, -- add flag prefix
-		args,
-	}, { text = true }):wait()
+
+	local cmd_args = { binary_path }
+
+	for i, command in ipairs(commands) do
+		table.insert(cmd_args, "--" .. command)
+		local arg = args[i]
+		if arg ~= nil then
+			table.insert(cmd_args, arg)
+		end
+	end
+
+	local result = vim.system(cmd_args, { text = true }):wait()
 
 	if result.stderr and #result.stderr > 0 then
 		vim.api.nvim_echo({
-			{
-				"Go plugin produced stderr output: " .. result.stderr,
-				"Error",
-			},
+			{ "Go plugin produced stderr output: " .. result.stderr, "Error" },
 		}, true, {})
 	end
 
@@ -358,7 +362,7 @@ M.open_rfc = function()
 		M.state.curr_float.type = "list"
 		M.state.curr_header = nil
 
-		M.data.list_data = run_go_plugin("list", "")
+		M.data.list_data = run_go_plugin({ "list" }, { nil })
 
 		change_buffer_content(M.state.curr_float, M.data.list_data)
 	end, {
@@ -416,11 +420,11 @@ M.open_rfc = function()
 		watch_buffer_changes(M.state.curr_header.buf, function(buf)
 			local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
 			if M.state.curr_float.type == "list" then
-				M.data.list_data = run_go_plugin("list", table.concat(lines))
+				M.data.list_data = run_go_plugin({ "list", "filter" }, { nil, table.concat(lines) })
 				change_buffer_content(M.state.curr_float, M.data.list_data)
 			elseif M.state.curr_float.type == "search" then
 				print("search")
-				M.data.search_data = run_go_plugin("rfc", table.concat(lines))
+				M.data.search_data = run_go_plugin({ "rfc" }, { table.concat(lines) })
 				change_buffer_content(M.state.curr_float, M.data.search_data)
 			end
 		end, {
@@ -454,7 +458,7 @@ M.open_rfc = function()
 				end
 
 				local lines = vim.api.nvim_buf_get_lines(M.state.curr_float.buf, 0, -1, false)
-				local new_lines = run_go_plugin("view", lines[cursor_info[1]])
+				local new_lines = run_go_plugin({ "view" }, { lines[cursor_info[1]] })
 				M.data.curr_view = lines[cursor_info[1]]
 				if M.state.view_floats[lines[cursor_info[1]]] == nil then
 					M.state.view_floats[lines[cursor_info[1]]] =
@@ -503,7 +507,7 @@ M.open_rfc = function()
 				end
 
 				local lines = vim.api.nvim_buf_get_lines(M.state.curr_float.buf, 0, -1, false)
-				local new_lines = run_go_plugin("get", lines[cursor_info[1]])
+				local new_lines = run_go_plugin({ "get" }, { lines[cursor_info[1]] })
 				M.data.curr_view = lines[cursor_info[1]]
 				M.state.view_floats[lines[cursor_info[1]]] = create_floating_window(window_config.view, false)
 				pcall(vim.api.nvim_buf_set_name, M.state.view_floats[lines[cursor_info[1]]].buf, lines[cursor_info[1]])
@@ -546,7 +550,7 @@ M.open_rfc = function()
 		if cursor_info[1] < 2 then
 			print("less than 2")
 		else
-			local new_lines = run_go_plugin("view", lines[cursor_info[1]])
+			local new_lines = run_go_plugin({ "view" }, { lines[cursor_info[1]] })
 			if type(lines[cursor_info[1]]) ~= "string" then
 				print("NOT STRING NOT STRING", lines[cursor_info[1]])
 			end
@@ -658,7 +662,7 @@ M.open_rfc = function()
 			print("less than 2")
 		else
 			if M.state.curr_float.type == "list" then
-				run_go_plugin("delete", lines[cursor_info[1]])
+				run_go_plugin({ "delete" }, { lines[cursor_info[1]] })
 				M.data.list_data[lines[cursor_info[1]]] = nil
 			else
 				if M.data.curr_view == lines[cursor_info[1]] then
