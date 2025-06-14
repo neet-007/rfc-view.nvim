@@ -85,23 +85,35 @@ local run_go_plugin = function(command, args)
 		args,
 	}, { text = true }):wait()
 
+	if result.stderr and #result.stderr > 0 then
+		vim.api.nvim_echo({
+			{
+				"Go plugin produced stderr output: " .. result.stderr,
+				"Error",
+			},
+		}, true, {})
+	end
+
 	return vim.split(result.stdout or "", "\n")
 end
 
 --- @alias FloatType "view" | "list" | "search" | "view_list"
 
-local state = {
+M.state = {
 	floats = {},
 	curr_float = {},
 	curr_header = {},
+	view_floats = {},
 }
 
-local data = {
+M.skip_win_close = false
+
+M.autocmds = {}
+
+M.data = {
 	list_data = { "nothing to list" },
-	view_data = { "nothing to view" },
 	curr_view = "__NONE__",
 	search_data = { "nothing to search" },
-	view_list = {},
 }
 
 local original_mappings = {}
@@ -138,12 +150,15 @@ local function restore_original_mappings()
 end
 
 local foreach_float = function(cb)
-	for name, float in pairs(state.floats) do
+	for name, float in pairs(M.state.floats) do
+		cb(name, float)
+	end
+	for name, float in pairs(M.state.view_floats) do
 		cb(name, float)
 	end
 end
 
-local function create_floating_window(config, enter)
+local function create_floating_window(config, enter, buf, is_scratch)
 	if enter == nil then
 		enter = false
 	end
@@ -158,8 +173,8 @@ local function create_floating_window(config, enter)
 			border = "rounded",
 		}
 
-	local buf = vim.api.nvim_create_buf(false, true) -- No file, scratch buffer
-	local win = vim.api.nvim_open_win(buf, enter or false, config)
+	buf = buf or vim.api.nvim_create_buf(false, is_scratch or true) -- No file, scratch buffer
+	local win = vim.api.nvim_open_win(buf, enter, config)
 
 	return { buf = buf, win = win, config = config }
 end
@@ -212,59 +227,83 @@ M.open_rfc = function()
 
 	local window_config = create_window_configurations()
 
-	state.floats.view = create_floating_window(window_config.view, true)
-	state.floats.list = create_floating_window(window_config.view, false)
-	state.floats.view_list = create_floating_window(window_config.view, false)
-	state.floats.search = create_floating_window(window_config.view, false)
-	state.floats.search_header = create_floating_window(window_config.search, true)
+	M.state.floats.view = create_floating_window(window_config.view, true)
+	M.state.floats.list = create_floating_window(window_config.view, false)
+	M.state.floats.view_list = create_floating_window(window_config.view, false)
+	M.state.floats.search = create_floating_window(window_config.view, false)
+	M.state.floats.search_header = create_floating_window(window_config.search, true)
 
-	state.floats.view.readonly = false
-	state.floats.view.modifiable = true
-	state.floats.list.readonly = true
-	state.floats.list.modifiable = false
-	state.floats.view_list.readonly = true
-	state.floats.view_list.modifiable = false
-	state.floats.search.readonly = true
-	state.floats.search.modifiable = false
-	state.floats.search_header.readonly = false
-	state.floats.search_header.modifiable = true
+	M.state.floats.view.readonly = false
+	M.state.floats.view.modifiable = true
+	M.state.floats.list.readonly = true
+	M.state.floats.list.modifiable = false
+	M.state.floats.view_list.readonly = true
+	M.state.floats.view_list.modifiable = false
+	M.state.floats.search.readonly = true
+	M.state.floats.search.modifiable = false
+	M.state.floats.search_header.readonly = false
+	M.state.floats.search_header.modifiable = true
 
-	state.curr_float = state.floats.view
-	state.curr_float.type = "list"
-	state.curr_header = nil
+	M.state.curr_float = M.state.floats.view
+	M.state.curr_float.type = "view"
+	M.state.curr_header = nil
 
-	if data.curr_view ~= "__NONE__" then
-		change_buffer_content(state.curr_float, data.view_list[data.curr_view])
+	if M.data.curr_view ~= "__NONE__" then
+		if not vim.api.nvim_win_is_valid(M.state.view_floats[M.data.curr_view].win) then
+			M.state.view_floats[M.data.curr_view] =
+				create_floating_window(window_config.view, false, M.state.view_floats[M.data.curr_view].buf)
+		end
+		vim.api.nvim_win_set_config(M.state.view_floats[M.data.curr_view].win, { zindex = 2 })
+		vim.api.nvim_set_current_win(M.state.view_floats[M.data.curr_view].win)
+		M.state.curr_float = M.state.view_floats[M.data.curr_view]
+		M.state.curr_float.type = "view"
 	else
-		change_buffer_content(state.curr_float, { "no current view" })
+		vim.api.nvim_win_set_config(M.state.floats.view.win, { zindex = 2 })
+		vim.api.nvim_set_current_win(M.state.floats.view.win)
+		M.state.curr_float = M.state.floats.view
+		M.state.curr_float.type = "view"
+		change_buffer_content(M.state.curr_float, { "no current view" })
+	end
+
+	for _, autocmd in ipairs(M.autocmds) do
+		pcall(vim.api.nvim_del_autocmd, autocmd)
 	end
 
 	foreach_float(function(name, float)
 		vim.bo[float.buf].filetype = "markdown"
-		vim.api.nvim_buf_set_name(float.buf, name)
+		pcall(vim.api.nvim_buf_set_name, float.buf, name)
 		if name ~= "view" and name ~= "search_header" then
 			vim.api.nvim_set_option_value("readonly", true, { buf = float.buf, scope = "local" })
 			vim.api.nvim_set_option_value("modifiable", false, { buf = float.buf, scope = "local" })
 		end
-		vim.api.nvim_create_autocmd("WinClosed", {
-			buffer = float.buf,
-			callback = function()
-				M.close_rfc()
-			end,
-		})
+		table.insert(
+			M.autocmds,
+			vim.api.nvim_create_autocmd("WinClosed", {
+				buffer = float.buf,
+				callback = function()
+					if M.skip_win_close then
+						print("skip_win_close 1")
+						M.skip_win_close = false
+						return
+					end
+					print("not skip_win_close 1")
+					M.close_rfc()
+				end,
+			})
+		)
 	end)
 
 	vim.keymap.set("n", "m", function()
 		if
-			not vim.api.nvim_win_is_valid(state.curr_float.win)
-			or (state.curr_header ~= nil and not vim.api.nvim_win_is_valid(state.curr_header.win))
+			not vim.api.nvim_win_is_valid(M.state.curr_float.win)
+			or (M.state.curr_header ~= nil and not vim.api.nvim_win_is_valid(M.state.curr_header.win))
 		then
 			vim.api.nvim_echo({
 				{
 					string.format(
 						"invalid state view %s %s",
-						vim.api.nvim_win_is_valid(state.curr_float.win),
-						(state.curr_header ~= nil and not vim.api.nvim_win_is_valid(state.curr_header.win))
+						vim.api.nvim_win_is_valid(M.state.curr_float.win),
+						(M.state.curr_header ~= nil and not vim.api.nvim_win_is_valid(M.state.curr_header.win))
 					),
 					"Error",
 				},
@@ -273,21 +312,25 @@ M.open_rfc = function()
 			return
 		end
 
-		vim.api.nvim_win_set_config(state.curr_float.win, { zindex = 1 })
-		if state.curr_header ~= nil then
-			vim.api.nvim_win_set_config(state.curr_header.win, { zindex = 1 })
+		vim.api.nvim_win_set_config(M.state.curr_float.win, { zindex = 1 })
+		if M.state.curr_header ~= nil then
+			vim.api.nvim_win_set_config(M.state.curr_header.win, { zindex = 1 })
 		end
 
-		vim.api.nvim_win_set_config(state.floats.view.win, { zindex = 2 })
-		vim.api.nvim_set_current_win(state.floats.view.win)
-		state.curr_float = state.floats.view
-		state.curr_float.type = "view"
-		state.curr_header = nil
-
-		if data.curr_view ~= "__NONE__" then
-			change_buffer_content(state.curr_float, data.view_list[data.curr_view])
+		if M.data.curr_view ~= "__NONE__" then
+			vim.api.nvim_win_set_config(M.state.view_floats[M.data.curr_view].win, { zindex = 2 })
+			vim.api.nvim_set_current_win(M.state.view_floats[M.data.curr_view].win)
+			M.state.curr_float = M.state.view_floats[M.data.curr_view]
+			M.state.curr_float.type = "view"
+			M.state.curr_header = nil
 		else
-			change_buffer_content(state.curr_float, { "no current view" })
+			vim.api.nvim_win_set_config(M.state.floats.view.win, { zindex = 2 })
+			vim.api.nvim_set_current_win(M.state.floats.view.win)
+			M.state.curr_float = M.state.floats.view
+			M.state.curr_float.type = "view"
+			M.state.curr_header = nil
+
+			change_buffer_content(M.state.curr_float, { "no current view" })
 		end
 	end, {
 		noremap = true, -- Non-recursive
@@ -296,28 +339,28 @@ M.open_rfc = function()
 
 	vim.keymap.set("n", "n", function()
 		if
-			not vim.api.nvim_win_is_valid(state.curr_float.win)
-			or (state.curr_header ~= nil and not vim.api.nvim_win_is_valid(state.curr_header.win))
+			not vim.api.nvim_win_is_valid(M.state.curr_float.win)
+			or (M.state.curr_header ~= nil and not vim.api.nvim_win_is_valid(M.state.curr_header.win))
 		then
-			vim.api.nvim_echo({ { "invalid state list", "Error" } }, true, {})
+			vim.api.nvim_echo({ { "invalid M.state list", "Error" } }, true, {})
 			M.close_rfc()
 			return
 		end
 
-		vim.api.nvim_win_set_config(state.curr_float.win, { zindex = 1 })
-		if state.curr_header ~= nil then
-			vim.api.nvim_win_set_config(state.curr_header.win, { zindex = 1 })
+		vim.api.nvim_win_set_config(M.state.curr_float.win, { zindex = 1 })
+		if M.state.curr_header ~= nil then
+			vim.api.nvim_win_set_config(M.state.curr_header.win, { zindex = 1 })
 		end
 
-		vim.api.nvim_win_set_config(state.floats.list.win, { zindex = 2 })
-		vim.api.nvim_set_current_win(state.floats.list.win)
-		state.curr_float = state.floats.list
-		state.curr_float.type = "list"
-		state.curr_header = nil
+		vim.api.nvim_win_set_config(M.state.floats.list.win, { zindex = 2 })
+		vim.api.nvim_set_current_win(M.state.floats.list.win)
+		M.state.curr_float = M.state.floats.list
+		M.state.curr_float.type = "list"
+		M.state.curr_header = nil
 
-		data.list_data = run_go_plugin("list", "")
+		M.data.list_data = run_go_plugin("list", "")
 
-		change_buffer_content(state.curr_float, data.list_data)
+		change_buffer_content(M.state.curr_float, M.data.list_data)
 	end, {
 		noremap = true, -- Non-recursive
 		silent = true, -- No command echo
@@ -325,27 +368,27 @@ M.open_rfc = function()
 
 	vim.keymap.set("n", "b", function()
 		if
-			not vim.api.nvim_win_is_valid(state.curr_float.win)
-			or (state.curr_header ~= nil and not vim.api.nvim_win_is_valid(state.curr_header.win))
+			not vim.api.nvim_win_is_valid(M.state.curr_float.win)
+			or (M.state.curr_header ~= nil and not vim.api.nvim_win_is_valid(M.state.curr_header.win))
 		then
-			vim.api.nvim_echo({ { "invalid state search", "Error" } }, true, {})
+			vim.api.nvim_echo({ { "invalid M.state search", "Error" } }, true, {})
 			M.close_rfc()
 			return
 		end
 
-		vim.api.nvim_win_set_config(state.curr_float.win, { zindex = 1 })
-		if state.curr_header ~= nil then
-			vim.api.nvim_win_set_config(state.curr_header.win, { zindex = 1 })
+		vim.api.nvim_win_set_config(M.state.curr_float.win, { zindex = 1 })
+		if M.state.curr_header ~= nil then
+			vim.api.nvim_win_set_config(M.state.curr_header.win, { zindex = 1 })
 		end
 
-		vim.api.nvim_win_set_config(state.floats.search.win, { zindex = 2 })
-		vim.api.nvim_win_set_config(state.floats.search_header.win, { zindex = 2 })
-		vim.api.nvim_set_current_win(state.floats.search.win)
-		state.curr_float = state.floats.search
-		state.curr_float.type = "search"
-		state.curr_header = state.floats.search_header
+		vim.api.nvim_win_set_config(M.state.floats.search.win, { zindex = 2 })
+		vim.api.nvim_win_set_config(M.state.floats.search_header.win, { zindex = 2 })
+		vim.api.nvim_set_current_win(M.state.floats.search.win)
+		M.state.curr_float = M.state.floats.search
+		M.state.curr_float.type = "search"
+		M.state.curr_header = M.state.floats.search_header
 
-		change_buffer_content(state.curr_float, data.search_data)
+		change_buffer_content(M.state.curr_float, M.data.search_data)
 	end, {
 		noremap = true, -- Non-recursive
 		silent = true, -- No command echo
@@ -353,32 +396,32 @@ M.open_rfc = function()
 
 	vim.keymap.set("n", "v", function()
 		if
-			not vim.api.nvim_win_is_valid(state.curr_float.win)
-			or (state.curr_header ~= nil and not vim.api.nvim_win_is_valid(state.curr_header.win))
+			not vim.api.nvim_win_is_valid(M.state.curr_float.win)
+			or (M.state.curr_header ~= nil and not vim.api.nvim_win_is_valid(M.state.curr_header.win))
 		then
-			vim.api.nvim_echo({ { "invalid state search header", "Error" } }, true, {})
+			vim.api.nvim_echo({ { "invalid M.state search header", "Error" } }, true, {})
 			M.close_rfc()
 			return
 		end
 
-		vim.api.nvim_win_set_config(state.curr_float.win, { zindex = 1 })
-		if state.curr_header ~= nil then
-			vim.api.nvim_win_set_config(state.curr_header.win, { zindex = 1 })
+		vim.api.nvim_win_set_config(M.state.curr_float.win, { zindex = 1 })
+		if M.state.curr_header ~= nil then
+			vim.api.nvim_win_set_config(M.state.curr_header.win, { zindex = 1 })
 		end
 
-		vim.api.nvim_win_set_config(state.floats.search_header.win, { zindex = 2 })
-		vim.api.nvim_set_current_win(state.floats.search_header.win)
-		state.curr_header = state.floats.search_header
+		vim.api.nvim_win_set_config(M.state.floats.search_header.win, { zindex = 2 })
+		vim.api.nvim_set_current_win(M.state.floats.search_header.win)
+		M.state.curr_header = M.state.floats.search_header
 
-		watch_buffer_changes(state.curr_header.buf, function(buf)
+		watch_buffer_changes(M.state.curr_header.buf, function(buf)
 			local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-			if state.curr_float.type == "list" then
-				data.list_data = run_go_plugin("list", table.concat(lines))
-				change_buffer_content(state.curr_float, data.list_data)
-			elseif state.curr_float.type == "search" then
+			if M.state.curr_float.type == "list" then
+				M.data.list_data = run_go_plugin("list", table.concat(lines))
+				change_buffer_content(M.state.curr_float, M.data.list_data)
+			elseif M.state.curr_float.type == "search" then
 				print("search")
-				data.search_data = run_go_plugin("rfc", table.concat(lines))
-				change_buffer_content(state.curr_float, data.search_data)
+				M.data.search_data = run_go_plugin("rfc", table.concat(lines))
+				change_buffer_content(M.state.curr_float, M.data.search_data)
 			end
 		end, {
 			debounce_ms = 500, -- Only trigger after 500ms of no changes
@@ -392,45 +435,94 @@ M.open_rfc = function()
 	})
 
 	vim.keymap.set("n", "<CR>", function()
-		if not vim.api.nvim_win_is_valid(state.curr_float.win) then
-			vim.api.nvim_echo({ { "invalid state", "Error" } }, true, {})
+		if not vim.api.nvim_win_is_valid(M.state.curr_float.win) then
+			vim.api.nvim_echo({ { "invalid M.state", "Error" } }, true, {})
 			M.close_rfc()
 			return
 		end
 
-		local cursor_info = vim.api.nvim_win_get_cursor(state.curr_float.win)
-		if state.curr_float.type == "list" or state.curr_float.type == "view_list" then
+		local cursor_info = vim.api.nvim_win_get_cursor(M.state.curr_float.win)
+		if M.state.curr_float.type == "list" or M.state.curr_float.type == "view_list" then
 			-- TODO: dont make anything for nothing to view here for view_list
 			if cursor_info[1] < 2 then
 				print("less than 2")
 			else
-				if not vim.api.nvim_win_is_valid(state.curr_float.win) then
-					vim.api.nvim_echo({ { "invalid state", "Error" } }, true, {})
+				if not vim.api.nvim_win_is_valid(M.state.curr_float.win) then
+					vim.api.nvim_echo({ { "invalid M.state", "Error" } }, true, {})
 					M.close_rfc()
 					return
 				end
 
-				local lines = vim.api.nvim_buf_get_lines(state.curr_float.buf, 0, -1, false)
+				local lines = vim.api.nvim_buf_get_lines(M.state.curr_float.buf, 0, -1, false)
 				local new_lines = run_go_plugin("view", lines[cursor_info[1]])
-				--data.view_data = new_lines
-				data.curr_view = lines[cursor_info[1]]
-				data.view_list[lines[cursor_info[1]]] = new_lines
+				M.data.curr_view = lines[cursor_info[1]]
+				if M.state.view_floats[lines[cursor_info[1]]] == nil then
+					M.state.view_floats[lines[cursor_info[1]]] =
+						create_floating_window(window_config.view, false, nil, false)
+					pcall(
+						vim.api.nvim_buf_set_name,
+						M.state.view_floats[lines[cursor_info[1]]].buf,
+						lines[cursor_info[1]]
+					)
+					table.insert(
+						M.autocmds,
+						vim.api.nvim_create_autocmd("WinClosed", {
+							buffer = M.state.view_floats[lines[cursor_info[1]]].buf,
+							callback = function()
+								if M.skip_win_close then
+									print("skip_win_close 3")
+									M.skip_win_close = false
+									return
+								end
+								print("not skip_win_close 3")
+								M.close_rfc()
+							end,
+						})
+					)
+					change_buffer_content(M.state.view_floats[lines[cursor_info[1]]], new_lines)
+				else
+					M.skip_win_close = true
+					if vim.api.nvim_win_is_valid(M.state.view_floats[lines[cursor_info[1]]].win) then
+						vim.api.nvim_win_close(M.state.view_floats[lines[cursor_info[1]]].win, true)
+					end
+					M.state.view_floats[lines[cursor_info[1]]] = create_floating_window(
+						window_config.view,
+						false,
+						M.state.view_floats[lines[cursor_info[1]]].buf
+					)
+				end
 			end
-		elseif state.curr_float.type == "search" then
+		elseif M.state.curr_float.type == "search" then
 			if cursor_info[1] < 2 then
 				print("less than 2")
 			else
-				if not vim.api.nvim_win_is_valid(state.curr_float.win) then
-					vim.api.nvim_echo({ { "invalid state", "Error" } }, true, {})
+				if not vim.api.nvim_win_is_valid(M.state.curr_float.win) then
+					vim.api.nvim_echo({ { "invalid M.state", "Error" } }, true, {})
 					M.close_rfc()
 					return
 				end
 
-				local lines = vim.api.nvim_buf_get_lines(state.curr_float.buf, 0, -1, false)
+				local lines = vim.api.nvim_buf_get_lines(M.state.curr_float.buf, 0, -1, false)
 				local new_lines = run_go_plugin("get", lines[cursor_info[1]])
-				--data.view_data = new_lines
-				data.curr_view = lines[cursor_info[1]]
-				data.view_list[lines[cursor_info[1]]] = new_lines
+				M.data.curr_view = lines[cursor_info[1]]
+				M.state.view_floats[lines[cursor_info[1]]] = create_floating_window(window_config.view, false)
+				pcall(vim.api.nvim_buf_set_name, M.state.view_floats[lines[cursor_info[1]]].buf, lines[cursor_info[1]])
+				table.insert(
+					M.autocmds,
+					vim.api.nvim_create_autocmd("WinClosed", {
+						buffer = M.state.view_floats[lines[cursor_info[1]]].buf,
+						callback = function()
+							if M.skip_win_close then
+								print("skip_win_close 2")
+								M.skip_win_close = false
+								return
+							end
+							print("not skip_win_close 2")
+							M.close_rfc()
+						end,
+					})
+				)
+				change_buffer_content(M.state.view_floats[lines[cursor_info[1]]], new_lines)
 			end
 		end
 	end, {
@@ -439,18 +531,18 @@ M.open_rfc = function()
 	})
 
 	vim.keymap.set("n", "s", function()
-		if state.curr_float.type ~= "list" then
+		if M.state.curr_float.type ~= "list" then
 			return
 		end
 
-		if not vim.api.nvim_win_is_valid(state.curr_float.win) then
-			vim.api.nvim_echo({ { "invalid state", "Error" } }, true, {})
+		if not vim.api.nvim_win_is_valid(M.state.curr_float.win) then
+			vim.api.nvim_echo({ { "invalid M.state", "Error" } }, true, {})
 			M.close_rfc()
 			return
 		end
 
-		local lines = vim.api.nvim_buf_get_lines(state.curr_float.buf, 0, -1, false)
-		local cursor_info = vim.api.nvim_win_get_cursor(state.curr_float.win)
+		local lines = vim.api.nvim_buf_get_lines(M.state.curr_float.buf, 0, -1, false)
+		local cursor_info = vim.api.nvim_win_get_cursor(M.state.curr_float.win)
 		if cursor_info[1] < 2 then
 			print("less than 2")
 		else
@@ -458,7 +550,24 @@ M.open_rfc = function()
 			if type(lines[cursor_info[1]]) ~= "string" then
 				print("NOT STRING NOT STRING", lines[cursor_info[1]])
 			end
-			data.view_list[lines[cursor_info[1]]] = new_lines
+			M.state.view_floats[lines[cursor_info[1]]] = create_floating_window(window_config.view, false, nil, false)
+			pcall(vim.api.nvim_buf_set_name, M.state.view_floats[lines[cursor_info[1]]].buf, lines[cursor_info[1]])
+			table.insert(
+				M.autocmds,
+				vim.api.nvim_create_autocmd("WinClosed", {
+					buffer = M.state.view_floats[lines[cursor_info[1]]].buf,
+					callback = function()
+						if M.skip_win_close then
+							print("skip_win_close 4")
+							M.skip_win_close = false
+							return
+						end
+						print("not skip_win_close 4")
+						M.close_rfc()
+					end,
+				})
+			)
+			change_buffer_content(M.state.view_floats[lines[cursor_info[1]]], new_lines)
 		end
 	end, {
 		noremap = true, -- Non-recursive
@@ -467,41 +576,41 @@ M.open_rfc = function()
 
 	vim.keymap.set("n", "z", function()
 		if
-			not vim.api.nvim_win_is_valid(state.curr_float.win)
-			or (state.curr_header ~= nil and not vim.api.nvim_win_is_valid(state.curr_header.win))
+			not vim.api.nvim_win_is_valid(M.state.curr_float.win)
+			or (M.state.curr_header ~= nil and not vim.api.nvim_win_is_valid(M.state.curr_header.win))
 		then
-			vim.api.nvim_echo({ { "invalid state list", "Error" } }, true, {})
+			vim.api.nvim_echo({ { "invalid M.state list", "Error" } }, true, {})
 			M.close_rfc()
 			return
 		end
 
-		vim.api.nvim_win_set_config(state.curr_float.win, { zindex = 1 })
-		if state.curr_header ~= nil then
-			vim.api.nvim_win_set_config(state.curr_header.win, { zindex = 1 })
+		vim.api.nvim_win_set_config(M.state.curr_float.win, { zindex = 1 })
+		if M.state.curr_header ~= nil then
+			vim.api.nvim_win_set_config(M.state.curr_header.win, { zindex = 1 })
 		end
 
-		vim.api.nvim_win_set_config(state.floats.view_list.win, { zindex = 2 })
-		vim.api.nvim_set_current_win(state.floats.view_list.win)
-		state.curr_float = state.floats.view_list
-		state.curr_float.type = "view_list"
-		state.curr_header = nil
+		vim.api.nvim_win_set_config(M.state.floats.view_list.win, { zindex = 2 })
+		vim.api.nvim_set_current_win(M.state.floats.view_list.win)
+		M.state.curr_float = M.state.floats.view_list
+		M.state.curr_float.type = "view_list"
+		M.state.curr_header = nil
 
 		local count = 0
-		for _, _ in pairs(data.view_list) do
+		for _, _ in pairs(M.state.view_floats) do
 			count = count + 1
 		end
 
 		if count == 0 then
-			change_buffer_content(state.curr_float, { "no current views" })
+			change_buffer_content(M.state.curr_float, { "no current views" })
 		else
 			local new_lines = {}
-			for name, _ in pairs(data.view_list) do
+			for name, _ in pairs(M.state.view_floats) do
 				if type(name) ~= "string" then
 					print("name not string ", name)
 				end
 				table.insert(new_lines, name)
 			end
-			change_buffer_content(state.curr_float, new_lines)
+			change_buffer_content(M.state.curr_float, new_lines)
 		end
 	end, {
 		noremap = true, -- Non-recursive
@@ -510,34 +619,55 @@ M.open_rfc = function()
 
 	vim.keymap.set("n", "d", function()
 		if
-			state.curr_float.type ~= "list"
-			and state.curr_float.type ~= "view_list"
-			and state.curr_float.type ~= "view"
+			M.state.curr_float.type ~= "list"
+			and M.state.curr_float.type ~= "view_list"
+			and M.state.curr_float.type ~= "view"
 		then
 			return
 		end
 
-		if state.curr_float.type == "view" then
-			data.curr_view = "__NONE__"
+		if M.state.curr_float.type == "view" then
+			M.state.curr_float = M.state.floats.view
+			M.state.curr_float.type = "view"
+			M.state.curr_header = nil
+
+			M.skip_win_close = true
+			vim.api.nvim_win_close(M.state.view_floats[M.data.curr_view].win, true)
+			vim.api.nvim_buf_delete(M.state.view_floats[M.data.curr_view].buf, { force = true })
+			M.state.view_floats[M.data.curr_view] = nil
+			M.data.curr_view = "__NONE__"
+
+			vim.api.nvim_win_set_config(M.state.floats.view.win, { zindex = 2 })
+			vim.api.nvim_set_current_win(M.state.floats.view.win)
+			M.state.curr_float = M.state.floats.view
+			M.state.curr_float.type = "view"
+			change_buffer_content(M.state.curr_float, { "no current view" })
+
 			return
 		end
 
-		if not vim.api.nvim_win_is_valid(state.curr_float.win) then
-			vim.api.nvim_echo({ { "invalid state", "Error" } }, true, {})
+		if not vim.api.nvim_win_is_valid(M.state.curr_float.win) then
+			vim.api.nvim_echo({ { "invalid M.state", "Error" } }, true, {})
 			M.close_rfc()
 			return
 		end
 
-		local lines = vim.api.nvim_buf_get_lines(state.curr_float.buf, 0, -1, false)
-		local cursor_info = vim.api.nvim_win_get_cursor(state.curr_float.win)
+		local lines = vim.api.nvim_buf_get_lines(M.state.curr_float.buf, 0, -1, false)
+		local cursor_info = vim.api.nvim_win_get_cursor(M.state.curr_float.win)
 		if cursor_info[1] < 2 then
 			print("less than 2")
 		else
-			if state.curr_float.type == "list" then
+			if M.state.curr_float.type == "list" then
 				run_go_plugin("delete", lines[cursor_info[1]])
-				data.list_data[lines[cursor_info[1]]] = nil
+				M.data.list_data[lines[cursor_info[1]]] = nil
 			else
-				data.view_list[lines[cursor_info[1]]] = nil
+				if M.data.curr_view == lines[cursor_info[1]] then
+					M.data.curr_view = "__NONE__"
+				end
+				M.skip_win_close = true
+				vim.api.nvim_win_close(M.state.view_floats[lines[cursor_info[1]]].win, true)
+				vim.api.nvim_buf_delete(M.state.view_floats[lines[cursor_info[1]]].buf, { force = true })
+				M.state.view_floats[lines[cursor_info[1]]] = nil
 			end
 		end
 	end, {
@@ -549,11 +679,11 @@ end
 M.close_rfc = function()
 	restore_original_mappings()
 
-	foreach_float(function(_, float)
+	foreach_float(function(name, float)
 		if float.win and vim.api.nvim_win_is_valid(float.win) then
 			vim.api.nvim_win_close(float.win, true)
 		end
-		if float.buf and vim.api.nvim_buf_is_valid(float.buf) then
+		if not (string.sub(name, 1, #"rfc") == "rfc") and float.buf and vim.api.nvim_buf_is_valid(float.buf) then
 			vim.api.nvim_buf_delete(float.buf, { force = true })
 		end
 	end)
@@ -591,6 +721,72 @@ M.print_buffers = function()
 			print(string.format("ID: %s, Name: '%s'", buf_id, buf_name))
 		end
 	end
+end
+
+M.print_windows = function()
+	local window_ids = vim.api.nvim_list_wins()
+
+	print("--- All Windows ---")
+	if #window_ids == 0 then
+		print("No windows currently open.")
+		return
+	end
+
+	for _, win_id in ipairs(window_ids) do
+		if vim.api.nvim_win_is_valid(win_id) then
+			local buf_id = vim.api.nvim_win_get_buf(win_id)
+			local is_current = (win_id == vim.api.nvim_get_current_win())
+
+			local buf_name = "[No Name]"
+			local buf_status = ""
+			if vim.api.nvim_buf_is_valid(buf_id) then
+				if vim.api.nvim_buf_is_loaded(buf_id) then
+					local name = vim.api.nvim_buf_get_name(buf_id)
+					if name ~= "" then
+						buf_name = name
+					end
+				else
+					buf_status = buf_status .. "[BufUnloaded]"
+				end
+
+				local is_listed = vim.api.nvim_get_option_value("buflisted", { buf = buf_id })
+				if not is_listed then
+					buf_status = buf_status .. "[BufUnlisted]"
+				end
+			else
+				buf_name = "[Invalid Buffer]"
+				buf_status = buf_status .. "[BufInvalid]"
+			end
+
+			local win_config = vim.api.nvim_win_get_config(win_id)
+			local win_type = ""
+			if win_config.relative ~= "" then
+				win_type = "Floating"
+			else
+				win_type = "Normal"
+			end
+
+			local win_info = string.format("Type: %s", win_type)
+			if is_current then
+				win_info = win_info .. " [CURRENT]"
+			end
+
+			print(
+				string.format(
+					"Win ID: %d, Buf ID: %d, Name: '%s' %s, Info: %s",
+					win_id,
+					buf_id,
+					buf_name,
+					buf_status,
+					win_info
+				)
+			)
+		end
+	end
+end
+
+M.print_state = function()
+	print(vim.inspect(M.state))
 end
 
 return M

@@ -65,6 +65,7 @@ func writeToRfc(name string, body []byte) (int, error) {
 	listPath := filepath.Join(getRfcDir(), "rfc_list")
 	f, err := os.Create(path + ".txt.gz")
 	if err != nil {
+		fmt.Printf("error creating %s\n", path)
 		return 0, err
 	}
 
@@ -328,9 +329,10 @@ func main() {
 
 	fmt.Printf("total count: %d\n", rfcs.Meta.TotalCount)
 	for _, rfc := range rfcs.Objects {
-		fmt.Printf("%s::%s\n", rfc.Name, rfc.Title)
+		title := strings.ReplaceAll(rfc.Title, "/", "-")
+		fmt.Printf("%s::%s\n", rfc.Name, title)
 		if *rfcSave {
-			getRfc(fmt.Sprintf("%s::%s", rfc.Name, rfc.Title), *rfcSave)
+			getRfc(fmt.Sprintf("%s::%s", rfc.Name, title), *rfcSave)
 		}
 	}
 }
