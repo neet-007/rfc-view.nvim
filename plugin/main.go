@@ -85,7 +85,10 @@ func writeToRfc(name string, body []byte) (int, error) {
 
 	defer f.Close()
 
-	f.WriteString(name + "\n")
+	if _, err := f.WriteString(name + "\n"); err != nil {
+		return 0, err
+	}
+
 	return n, nil
 }
 
@@ -116,9 +119,40 @@ func searchRFCs(query string) (*RFCResponse, error) {
 	return &result, nil
 }
 
+func checkRfc(name string) (bool, error) {
+	listPath := filepath.Join(getRfcDir(), "rfc_list")
+
+	f, err := os.Open(listPath + ".txt")
+
+	if err != nil {
+		return false, err
+	}
+
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == name {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
 func getRfc(name string, save bool) (int, error) {
 	if !strings.Contains(name, "::") {
 		return 0, fmt.Errorf("invalid name %s must contain RFC::TITLE", name)
+	}
+
+	ok, err := checkRfc(name)
+	if err != nil {
+		return 0, err
+	}
+
+	if ok {
+		return 0, nil
 	}
 
 	url := "https://www.rfc-editor.org/rfc/" + strings.Split(name, "::")[0] + ".txt"
@@ -182,6 +216,9 @@ func listRfc(filter string) {
 	scanner = bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := scanner.Text()
+		if line == "" {
+			continue
+		}
 		if filter == "" {
 			fmt.Println(line)
 		} else if strings.Contains(strings.ToLower(strings.Split(line, "::")[1]), strings.ToLower(filter)) {
@@ -279,6 +316,44 @@ func deleteRfc(name string) error {
 	return nil
 }
 
+func deleteAllRfcs() error {
+	rfcListPath := filepath.Join(getRfcDir(), "rfc_list") + ".txt"
+
+	entries, err := os.ReadDir(getRfcDir())
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		fullPath := filepath.Join(getRfcDir(), entry.Name())
+		if fullPath == rfcListPath {
+			continue
+		}
+
+		err = os.Remove(filepath.Join(getRfcDir(), entry.Name()))
+		if err != nil {
+			log.Printf("error deleting %s: %v", entry.Name(), err)
+		}
+	}
+
+	f, err := os.Open(rfcListPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	err = os.Truncate(rfcListPath, 0)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func main() {
 	err := initRfc()
 	if err != nil {
@@ -288,6 +363,7 @@ func main() {
 	rfcSearch := flag.String("rfc", "", "rfc name")
 	rfcSave := flag.Bool("save", false, "save rfc")
 	rfcList := flag.Bool("list", false, "view rfc list")
+	rfcDeleteAll := flag.Bool("delete-all", false, "delete all rfcs")
 	rfcListFilter := flag.String("filter", "", "filter rfc list")
 	rfcView := flag.String("view", "", "view rfc")
 	rfcGet := flag.String("get", "", "get rfc")
@@ -297,6 +373,14 @@ func main() {
 
 	if *rfcList {
 		listRfc(*rfcListFilter)
+		return
+	}
+
+	if *rfcDeleteAll {
+		if err := deleteAllRfcs(); err != nil {
+			log.Fatal(err)
+		}
+
 		return
 	}
 
