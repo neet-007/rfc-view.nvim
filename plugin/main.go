@@ -12,8 +12,12 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
+	"sync"
 )
 
 type RFC struct {
@@ -60,9 +64,8 @@ func initRfc() error {
 	return nil
 }
 
-func writeToRfc(name string, body []byte) (int, error) {
+func writeToRfc(name string, body []byte, writeToList bool) (int, error) {
 	path := filepath.Join(getRfcDir(), name)
-	listPath := filepath.Join(getRfcDir(), "rfc_list")
 	f, err := os.Create(path + ".txt.gz")
 	if err != nil {
 		fmt.Printf("error creating %s\n", path)
@@ -78,15 +81,18 @@ func writeToRfc(name string, body []byte) (int, error) {
 		return 0, err
 	}
 
-	f, err = os.OpenFile(listPath+".txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return 0, err
-	}
+	if writeToList {
+		listPath := filepath.Join(getRfcDir(), "rfc_list")
+		f, err = os.OpenFile(listPath+".txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			return 0, err
+		}
 
-	defer f.Close()
+		defer f.Close()
 
-	if _, err := f.WriteString(name + "\n"); err != nil {
-		return 0, err
+		if _, err := f.WriteString(name + "\n"); err != nil {
+			return 0, err
+		}
 	}
 
 	return n, nil
@@ -171,7 +177,7 @@ func getRfc(name string, save bool) (int, error) {
 	body := buf.Bytes()
 
 	if save {
-		return writeToRfc(name, body)
+		return writeToRfc(name, body, true)
 	}
 
 	return 0, nil
@@ -194,9 +200,9 @@ func listRfc(filter string) {
 	for scanner1.Scan() {
 		line := scanner1.Text()
 		if filter == "" {
-			lineCount++ // Just count, don't print yet
+			lineCount++
 		} else if strings.Contains(strings.ToLower(strings.Split(line, "::")[1]), strings.ToLower(filter)) {
-			lineCount++ // Just count, don't print yet
+			lineCount++
 		}
 	}
 
@@ -354,6 +360,120 @@ func deleteAllRfcs() error {
 	return nil
 }
 
+func fetchRFCList() ([]string, error) {
+	indexURL := "https://www.rfc-editor.org/rfc/rfc-index.txt"
+	resp, err := http.Get(indexURL)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	scanner := bufio.NewScanner(resp.Body)
+	re := regexp.MustCompile(`^(\d{4})\s+(.*?)\.\s`)
+
+	var rfcs []string
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		if strings.Contains(line, "Not Issued.") {
+			continue
+		}
+
+		if matches := re.FindStringSubmatch(line); matches != nil {
+			for matches[1][0] == '0' {
+				matches[1] = matches[1][1:]
+			}
+			rfcs = append(rfcs, matches[1]+"::"+matches[2])
+		}
+	}
+	return rfcs, scanner.Err()
+}
+
+func downloadRFC(rfc string) error {
+	rfcNumber := fmt.Sprintf("rfc%s.txt", strings.Split(rfc, "::")[0])
+	url := fmt.Sprintf("%s/%s", "https://www.rfc-editor.org/rfc", rfcNumber)
+	target := path.Join(getRfcDir(), "rfc"+rfc+".txt.gz")
+
+	if _, err := os.Stat(target); err == nil {
+		return fmt.Errorf("Already exists: RFC %s\n", rfc)
+	}
+
+	resp, err := http.Get(url)
+	if err != nil || resp.StatusCode != 200 {
+		return fmt.Errorf("Failed to fetch RFC %s: %v (%d)\n", rfc, err, resp.StatusCode)
+	}
+	defer resp.Body.Close()
+
+	var buf bytes.Buffer
+	_, err = io.Copy(&buf, resp.Body)
+	if err != nil {
+		return err
+	}
+
+	body := buf.Bytes()
+	writeToRfc("rfc"+rfc, body, false)
+
+	return nil
+}
+
+func rfcDownloadAll() error {
+	fmt.Println("Downloading RFC index...")
+	rfcs, err := fetchRFCList()
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Found %d RFCs\n", len(rfcs))
+
+	jobs := make(chan string, len(rfcs))
+	var wg sync.WaitGroup
+
+	var mu sync.Mutex
+	failed_rfcs := []string{}
+
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for rfc := range jobs {
+				if err := downloadRFC(rfc); err != nil {
+					mu.Lock()
+					failed_rfcs = append(failed_rfcs, rfc)
+					mu.Unlock()
+				}
+			}
+		}()
+	}
+
+	for _, rfc := range rfcs {
+		jobs <- rfc
+	}
+
+	close(jobs)
+	wg.Wait()
+
+	fmt.Println("All RFCs downloaded.")
+
+	listPath := filepath.Join(getRfcDir(), "rfc_list")
+	f, err := os.OpenFile(listPath+".txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+
+	defer f.Close()
+
+	for _, rfc := range rfcs {
+		if slices.Contains(failed_rfcs, rfc) {
+			continue
+		}
+
+		if _, err := f.WriteString("rfc" + rfc + "\n"); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func main() {
 	err := initRfc()
 	if err != nil {
@@ -368,8 +488,17 @@ func main() {
 	rfcView := flag.String("view", "", "view rfc")
 	rfcGet := flag.String("get", "", "get rfc")
 	rfcDelete := flag.String("delete", "", "delete rfc")
+	rfcDownloadAllRfc := flag.Bool("download-all", false, "download all rfcs")
 
 	flag.Parse()
+
+	if *rfcDownloadAllRfc {
+		if err := rfcDownloadAll(); err != nil {
+			log.Fatal(err)
+		}
+
+		return
+	}
 
 	if *rfcList {
 		listRfc(*rfcListFilter)

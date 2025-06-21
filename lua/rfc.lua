@@ -72,7 +72,7 @@ local watch_buffer_changes = function(buf_id, callback, opts)
 	}
 end
 
---- @alias PluginCommands "rfc" | "save" | "list" | "view" | "get" | "delete" | "filter" | "delete-all"
+--- @alias PluginCommands "rfc" | "save" | "list" | "view" | "get" | "delete" | "filter" | "delete-all" | "download-all"
 
 --- @param commands PluginCommands[]
 --- @param args (string|nil)[] # arguments for each flag, same order, nil to skip
@@ -115,14 +115,14 @@ M.skip_win_close = false
 M.autocmds = {}
 
 M.data = {
-	list_data = { "nothing to list" },
+	list_data = {},
 	curr_view = "__NONE__",
 	search_data = { "nothing to search" },
 }
 
 local original_mappings = {}
 
-local keys_to_store = { "m", "n", "b", "v", "<CR>", "s", "d" }
+local keys_to_store = { "m", "n", "b", "v", "<CR>", "s", "d", "r", "D", "z" }
 
 local function store_original_mappings()
 	original_mappings = {}
@@ -228,6 +228,23 @@ local change_buffer_content = function(float, lines)
 	vim.api.nvim_set_option_value("modifiable", float.modifiable, { buf = float.buf, scope = "local" })
 end
 
+local check_win_in_list = function(winId)
+	for _, float in pairs(M.state.floats) do
+		if float.win == winId then
+			return true
+		end
+	end
+	for _, float in pairs(M.state.view_floats) do
+		if float.win == winId then
+			return true
+		end
+	end
+end
+
+local has_elements = function(list)
+	return next(list) ~= nil
+end
+
 M.setup = function()
 	-- nothing
 end
@@ -290,7 +307,11 @@ M.open_rfc = function()
 			M.autocmds,
 			vim.api.nvim_create_autocmd("WinClosed", {
 				buffer = float.buf,
-				callback = function()
+				callback = function(args)
+					local winId = tonumber(args.match)
+					if not check_win_in_list(winId) then
+						return
+					end
 					if M.skip_win_close then
 						print("skip_win_close 1")
 						M.skip_win_close = false
@@ -368,7 +389,12 @@ M.open_rfc = function()
 		M.state.curr_float.type = "list"
 		M.state.curr_header = nil
 
-		M.data.list_data = run_go_plugin({ "list" }, { nil })
+		if not has_elements(M.data.list_data) then
+			M.data.list_data = run_go_plugin({ "list" }, { nil })
+		end
+		if not has_elements(M.data.list_data) then
+			M.data.list_data = { "nothing to list" }
+		end
 
 		change_buffer_content(M.state.curr_float, M.data.list_data)
 	end, {
@@ -482,11 +508,20 @@ M.open_rfc = function()
 						M.state.view_floats[lines[cursor_info[1]]].buf,
 						lines[cursor_info[1]]
 					)
+					pcall(
+						vim.api.nvim_set_option_value,
+						true,
+						{ buf = M.state.view_floats[M.data.curr_view].buf, scope = "local" }
+					)
 					table.insert(
 						M.autocmds,
 						vim.api.nvim_create_autocmd("WinClosed", {
 							buffer = M.state.view_floats[lines[cursor_info[1]]].buf,
-							callback = function()
+							callback = function(args)
+								local winId = tonumber(args.match)
+								if not check_win_in_list(winId) then
+									return
+								end
 								if M.skip_win_close then
 									print("skip_win_close 3")
 									M.skip_win_close = false
@@ -539,11 +574,20 @@ M.open_rfc = function()
 						M.state.view_floats[lines[cursor_info[1]]].buf,
 						lines[cursor_info[1]]
 					)
+					pcall(
+						vim.api.nvim_set_option_value,
+						true,
+						{ buf = M.state.view_floats[M.data.curr_view].buf, scope = "local" }
+					)
 					table.insert(
 						M.autocmds,
 						vim.api.nvim_create_autocmd("WinClosed", {
 							buffer = M.state.view_floats[lines[cursor_info[1]]].buf,
-							callback = function()
+							callback = function(args)
+								local winId = tonumber(args.match)
+								if not check_win_in_list(winId) then
+									return
+								end
 								if M.skip_win_close then
 									print("skip_win_close 2")
 									M.skip_win_close = false
@@ -595,11 +639,20 @@ M.open_rfc = function()
 			end
 			M.state.view_floats[lines[cursor_info[1]]] = create_floating_window(window_config.view, false, nil, false)
 			pcall(vim.api.nvim_buf_set_name, M.state.view_floats[lines[cursor_info[1]]].buf, lines[cursor_info[1]])
+			pcall(
+				vim.api.nvim_set_option_value,
+				true,
+				{ buf = M.state.view_floats[M.data.curr_view].buf, scope = "local" }
+			)
 			table.insert(
 				M.autocmds,
 				vim.api.nvim_create_autocmd("WinClosed", {
 					buffer = M.state.view_floats[lines[cursor_info[1]]].buf,
-					callback = function()
+					callback = function(args)
+						local winId = tonumber(args.match)
+						if not check_win_in_list(winId) then
+							return
+						end
 						if M.skip_win_close then
 							print("skip_win_close 4")
 							M.skip_win_close = false
@@ -666,7 +719,15 @@ M.open_rfc = function()
 			M.state.curr_float.type ~= "list"
 			and M.state.curr_float.type ~= "view_list"
 			and M.state.curr_float.type ~= "view"
+			and M.state.curr_float.type ~= "search"
 		then
+			return
+		end
+
+		if M.state.curr_float.type == "search" then
+			M.data.search_data = run_go_plugin({ "download-all" }, { nil })
+
+			change_buffer_content(M.state.curr_float, { "downloading all rfcs" })
 			return
 		end
 
@@ -827,6 +888,7 @@ end
 
 M.close_rfc = function()
 	restore_original_mappings()
+	M.data.list_data = {}
 
 	foreach_float(function(name, float)
 		if float.win and vim.api.nvim_win_is_valid(float.win) then
