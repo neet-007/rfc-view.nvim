@@ -497,13 +497,15 @@ func rfcDownloadAll() error {
 			defer wg.Done()
 			for rfc := range jobs {
 				if err := downloadRFC(rfc); err != nil {
-					if _, ok := err.(*NotFound); ok {
-						continue
-					}
 					mu.Lock()
-					fmt.Printf("failed to download %s %v\n", rfc, err)
 					blackList[rfc.PathName] = true
 					mu.Unlock()
+
+					if _, ok := err.(*NotFound); ok {
+						fmt.Printf("rfc does not exist %s %v\n", rfc, err)
+					} else {
+						fmt.Printf("failed to download %s %v\n", rfc, err)
+					}
 				}
 			}
 		}()
