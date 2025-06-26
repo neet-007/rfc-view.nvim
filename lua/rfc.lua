@@ -6,6 +6,7 @@ local state = {
 	floats = {},
 	curr_float = {},
 	view_floats = {},
+	footer_ns = vim.api.nvim_create_namespace("footer_namespace"),
 }
 
 local skip_win_close = false
@@ -50,14 +51,15 @@ local create_window_configurations = function()
 	local width = vim.o.columns
 	local height = vim.o.lines
 
-	local header_height = 1 + 2 -- 1 + border
-	local body_height = height - header_height - 2 - 1 -- for our own border
+	local header_height = 1 -- 1 + border
+	local footer_height = 1 -- 1 + border
+	local body_height = height - header_height - footer_height - 2 - 1 -- for our own border
 
 	return {
 		search = {
 			relative = "editor",
 			width = width - 16,
-			height = 1,
+			height = header_height,
 			style = "minimal",
 			border = "rounded",
 			col = 8,
@@ -67,23 +69,42 @@ local create_window_configurations = function()
 		view = {
 			relative = "editor",
 			width = width - 16,
-			height = body_height,
+			height = body_height - 2 - 1,
 			style = "minimal",
 			border = { " ", " ", " ", " ", " ", " ", " ", " " },
 			col = 8,
-			row = 4,
+			row = header_height + 2,
 			zindex = 1,
+		},
+		footer = {
+			relative = "editor",
+			width = width - 16,
+			height = footer_height,
+			style = "minimal",
+			border = { " ", " ", " ", " ", " ", " ", " ", " " },
+			col = 8,
+			row = header_height + body_height,
+			zindex = 2,
 		},
 	}
 end
 
 local delete_buffers_when_closing = false
 
+local footer_default_data = {
+	curr_view = { key = "no view", prefix = "Current view: ", show_fully = true },
+	curr_float = { key = "no float", prefix = "Current float: ", show_fully = false },
+	status = { key = "no status", prefix = "Status: ", show_fully = true },
+}
+
+local footer_default_order = { "curr_view", "curr_float", "status" }
+
 local data = {
 	list_data = {},
 	curr_view = "__NONE__",
 	search_data = { "nothing to search" },
 	fetching_view_data = {},
+	footer_data = {},
 }
 
 local is_searching = false
@@ -93,7 +114,7 @@ local window_config = create_window_configurations()
 
 local original_mappings = {}
 
-local keys_to_store = {
+local default_keys = {
 	view = "m",
 	list = "n",
 	search = "b",
@@ -106,17 +127,19 @@ local keys_to_store = {
 	view_list = "z",
 }
 
+local config_keys = {}
+
 local function store_original_mappings()
 	original_mappings = {}
 	for _, map in ipairs(vim.api.nvim_get_keymap("n")) do
-		if vim.tbl_contains(keys_to_store, map.lhs) then
+		if vim.tbl_contains(config_keys, map.lhs) then
 			original_mappings[map.lhs] = map
 		end
 	end
 end
 
 local function restore_original_mappings()
-	for _, key in pairs(keys_to_store) do
+	for _, key in pairs(config_keys) do
 		local map = original_mappings[key]
 
 		if not map then
@@ -204,6 +227,115 @@ local change_buffer_content = function(float, lines)
 	vim.api.nvim_set_option_value("modifiable", float.modifiable, { buf = float.buf, scope = "local" })
 end
 
+local place_colored_shape = function(buf, line, col, hl_group, ns, shape_char)
+	print(line .. " " .. col .. " " .. string.len(shape_char) .. "end_col: " .. (col + string.len(shape_char)))
+	shape_char = shape_char or "█"
+
+	vim.api.nvim_buf_set_extmark(buf, ns, line, col, {
+		virt_text = { { shape_char, hl_group } },
+		virt_text_pos = "overlay",
+		end_row = line,
+		end_col = col + string.len(shape_char),
+	})
+end
+
+local change_footer_content = function(footer_keys, display_order)
+	if not vim.api.nvim_buf_is_valid(state.floats.footer.buf) then
+		return
+	end
+
+	display_order = display_order or footer_default_order
+
+	local footer_width = window_config.footer.width
+	local current_text_line = ""
+	local extra_marks_coords = {}
+	local current_col_offset = 0
+	local rectangle_visual_width = 1
+	local separator_width = 2
+	local ellipsis = "..."
+
+	vim.api.nvim_buf_clear_namespace(state.floats.footer.buf, state.footer_ns, 0, -1)
+
+	data.footer_data = vim.deepcopy(footer_default_data)
+	if type(footer_keys) == "table" then
+		for key_name, key_value in pairs(footer_keys) do
+			data.footer_data[key_name] = key_value
+		end
+	else
+		vim.notify("opts must be a table", vim.log.levels.WARN)
+		return
+	end
+
+	local fixed_components_width = 0
+	local flexible_components = {}
+
+	for _, component_name in ipairs(display_order) do
+		local component_data = data.footer_data[component_name]
+		if component_data then
+			local prefix = component_data.prefix or ""
+			local key_content = component_data.key or ""
+			local full_text = prefix .. key_content
+			local total_component_width = rectangle_visual_width + string.len(full_text)
+
+			if component_data.show_fully then
+				fixed_components_width = fixed_components_width + total_component_width
+				fixed_components_width = fixed_components_width + separator_width
+			else
+				table.insert(flexible_components, { name = component_name, data = component_data })
+			end
+		end
+	end
+
+	local available_space_for_flexible = footer_width - fixed_components_width
+
+	local truncatable_component = nil
+	if #flexible_components > 0 then
+		truncatable_component = flexible_components[1]
+	end
+
+	for idx, component_name in ipairs(display_order) do
+		local component_data = data.footer_data[component_name]
+		if component_data then
+			local prefix = component_data.prefix or ""
+			local key_content = component_data.key or ""
+			local display_text = prefix .. key_content
+
+			if truncatable_component and component_name == truncatable_component.name then
+				local desired_text_width = available_space_for_flexible
+					- rectangle_visual_width
+					- (#flexible_components - 1) * separator_width
+
+				if desired_text_width < 0 then
+					display_text = ""
+				elseif string.len(display_text) > desired_text_width then
+					local truncate_len = desired_text_width - string.len(ellipsis)
+					if truncate_len < 0 then
+						truncate_len = 0
+					end
+					display_text = string.sub(display_text, 1, truncate_len) .. ellipsis
+				end
+			end
+
+			table.insert(extra_marks_coords, { current_col_offset, 0 })
+
+			current_text_line = current_text_line .. string.rep(" ", rectangle_visual_width) .. display_text
+
+			current_col_offset = current_col_offset + rectangle_visual_width + string.len(display_text)
+
+			if idx < #display_order then
+				current_text_line = current_text_line .. string.rep(" ", separator_width)
+				current_col_offset = current_col_offset + separator_width
+			end
+		end
+	end
+
+	change_buffer_content(state.floats.footer, { current_text_line })
+
+	for _, mark in pairs(extra_marks_coords) do
+		place_colored_shape(state.floats.footer.buf, mark[2], mark[1], "Footer", state.footer_ns, "█")
+	end
+end
+
 local change_current_window = function(float, type)
 	if state.curr_float ~= nil and vim.api.nvim_win_is_valid(state.curr_float.win) then
 		vim.api.nvim_win_set_config(state.curr_float.win, { zindex = 1 })
@@ -214,6 +346,16 @@ local change_current_window = function(float, type)
 	if type ~= nil then
 		state.curr_float.type = type
 	end
+
+	local curr_view = data.curr_view
+	if curr_view == "__NONE__" then
+		curr_view = "no view"
+	end
+	change_footer_content({
+		curr_view = { key = curr_view, prefix = "Current view: ", show_fully = true },
+		curr_float = { key = state.curr_float.type, prefix = "Current float: ", show_fully = false },
+		status = { key = "no status", prefix = "Status: ", show_fully = true },
+	})
 end
 
 local close_window = function(win_id, skip)
@@ -257,6 +399,9 @@ end, { desc = "close_rfc" })
 vim.keymap.set("n", "<Leader>rb", function()
 	M.print_buffers()
 end, { desc = "print buffers" })
+vim.keymap.set("n", "<Leader>rs", function()
+	M.setup({ delete_buffers_when_closing = true })
+end, { desc = "setup" })
 
 local active_watchers = {}
 
@@ -327,6 +472,7 @@ local add_view = function(title, lines, set_curr_view)
 
 	if set_curr_view then
 		data.curr_view = title
+		change_footer_content({ curr_view = { key = title, prefix = "Current view: ", show_fully = true } })
 	end
 	if state.view_floats[title] == nil then
 		add_rfc_buffer(title, lines)
@@ -435,7 +581,9 @@ local run_go_plugin = function(commands, args)
 			return {}
 		end
 
+		change_footer_content({ status = { key = "Downloading all rfcs", prefix = "Status: ", show_fully = true } })
 		go_async_command("download-all", cmd_args, nil, nil, function(exit_code, _, last_command_errors)
+			change_footer_content({ status = { key = "no status", prefix = "Status: ", show_fully = true } })
 			if last_command_errors ~= nil and #last_command_errors > 0 then
 				vim.notify("Download all errors:\n" .. table.concat(last_command_errors, "\n"), vim.log.levels.WARN)
 				data.search_data = { "Download all errors:\n" .. table.concat(last_command_errors, "\n") }
@@ -452,6 +600,7 @@ local run_go_plugin = function(commands, args)
 			return {}
 		end
 
+		change_footer_content({ status = { key = "Searching for rfcs", prefix = "Status: ", show_fully = true } })
 		go_async_command("search", cmd_args, function(_, data_arg, _)
 			for _, line in ipairs(data_arg) do
 				if line and line:match("%S") then
@@ -461,6 +610,7 @@ local run_go_plugin = function(commands, args)
 		end, function(_, data_arg, _)
 			vim.notify("Error: " .. table.concat(data_arg, "\n"), vim.log.levels.WARN)
 		end, function(exit_code, _, last_command_errors)
+			change_footer_content({ status = { key = "no status", prefix = "Status: ", show_fully = true } })
 			if last_command_errors ~= nil and #last_command_errors > 0 then
 				vim.notify("Search errors:\n" .. table.concat(last_command_errors, "\n"), vim.log.levels.WARN)
 			else
@@ -476,6 +626,9 @@ local run_go_plugin = function(commands, args)
 			return {}
 		end
 
+		change_footer_content({
+			status = { key = "Downloading rfc " .. cmd_args[3], prefix = "Status: ", show_fully = true },
+		})
 		go_async_command("get", cmd_args, function(_, data_arg, _)
 			for _, line in ipairs(data_arg) do
 				table.insert(data.fetching_view_data, line)
@@ -483,6 +636,7 @@ local run_go_plugin = function(commands, args)
 		end, function(_, data_arg, _)
 			vim.notify("Error: " .. table.concat(data_arg, "\n"), vim.log.levels.WARN)
 		end, function(exit_code, _, last_command_errors)
+			change_footer_content({ status = { key = "no status", prefix = "Status: ", show_fully = true } })
 			if last_command_errors ~= nil and #last_command_errors > 0 then
 				vim.notify("Download errors:\n" .. table.concat(last_command_errors, "\n"), vim.log.levels.WARN)
 			else
@@ -689,6 +843,63 @@ local open_search_header = function(create)
 	})
 end
 
+local open_footer = function(create)
+	create = create or false
+	if not state.floats.footer then
+		if create then
+			state.floats.footer = create_floating_window(
+				window_config.footer,
+				true,
+				nil,
+				nil,
+				state.floats.footer.read_only,
+				state.floats.footer.modifiable,
+				"footer"
+			)
+			local curr_view = data.curr_view
+			if curr_view == "__NONE__" then
+				curr_view = "no view"
+			end
+
+			change_footer_content({
+				curr_view = { key = curr_view, prefix = "Current view: ", show_fully = true },
+				curr_float = { key = state.curr_float.type, prefix = "Current float: ", show_fully = false },
+				status = { key = "no status", prefix = "Status: ", show_fully = true },
+			})
+		else
+			vim.notify("footer not created", vim.log.levels.WARN)
+			return
+		end
+	else
+		if not vim.api.nvim_win_is_valid(state.floats.footer.win) then
+			if not create then
+				return
+			end
+			state.floats.footer = create_floating_window(
+				window_config.footer,
+				true,
+				nil,
+				nil,
+				state.floats.footer.read_only,
+				state.floats.footer.modifiable,
+				"footer"
+			)
+			local curr_view = data.curr_view
+			if curr_view == "__NONE__" then
+				curr_view = "no view"
+			end
+
+			change_footer_content({
+				curr_view = { key = curr_view, prefix = "Current view: ", show_fully = true },
+				curr_float = { key = state.curr_float.type, prefix = "Current float: ", show_fully = false },
+			})
+		else
+			vim.notify("footer not created", vim.log.levels.WARN)
+			return
+		end
+	end
+end
+
 local open_view_list = function(create)
 	create = create or false
 	if not vim.api.nvim_win_is_valid(state.floats.view_list.win) then
@@ -749,11 +960,19 @@ local initial_state = function()
 	state.floats.search = create_floating_window(window_config.view, false, nil, nil, true, false, "search")
 	state.floats.search_header =
 		create_floating_window(window_config.search, true, nil, nil, false, true, "search_header")
+	state.floats.footer = create_floating_window(window_config.footer, true, nil, nil, false, true, "footer")
 end
 
 M.setup = function(opts)
+	opts = opts or {}
+	config_keys = vim.deepcopy(default_keys)
+	if opts.keys and type(opts.keys) == "table" then
+		for key_name, key_value in pairs(opts.keys) do
+			config_keys[key_name] = key_value
+		end
+	end
+
 	delete_buffers_when_closing = opts.delete_buffers_when_closing or false
-	initial_state()
 end
 
 M.open_rfc = function()
@@ -762,8 +981,18 @@ M.open_rfc = function()
 	if not has_elements(state.curr_float) then
 		initial_state()
 		open_view()
+
+		local curr_view = data.curr_view
+		if curr_view == "__NONE__" then
+			curr_view = "no view"
+		end
+		change_footer_content({
+			curr_view = { key = curr_view, prefix = "Current view: ", show_fully = true },
+			curr_float = { key = state.curr_float.type, prefix = "Current float: ", show_fully = false },
+		})
 	else
 		open_search_header(true)
+		open_footer(true)
 		if state.curr_float.type == "view" then
 			open_view(nil, true)
 		elseif state.curr_float.type == "list" then
@@ -775,7 +1004,7 @@ M.open_rfc = function()
 		end
 	end
 
-	vim.keymap.set("n", "m", function()
+	vim.keymap.set("n", config_keys["view"], function()
 		if not validate_state() then
 			return
 		end
@@ -786,7 +1015,7 @@ M.open_rfc = function()
 		silent = true, -- No command echo
 	})
 
-	vim.keymap.set("n", "n", function()
+	vim.keymap.set("n", config_keys["list"], function()
 		if not validate_state() then
 			return
 		end
@@ -797,7 +1026,7 @@ M.open_rfc = function()
 		silent = true, -- No command echo
 	})
 
-	vim.keymap.set("n", "b", function()
+	vim.keymap.set("n", config_keys["search"], function()
 		if not validate_state() then
 			return
 		end
@@ -808,7 +1037,7 @@ M.open_rfc = function()
 		silent = true, -- No command echo
 	})
 
-	vim.keymap.set("n", "z", function()
+	vim.keymap.set("n", config_keys["view_list"], function()
 		if not validate_state() then
 			return
 		end
@@ -819,7 +1048,7 @@ M.open_rfc = function()
 		silent = true, -- No command echo
 	})
 
-	vim.keymap.set("n", "v", function()
+	vim.keymap.set("n", config_keys["search_header"], function()
 		if not validate_state() then
 			return
 		end
@@ -843,7 +1072,7 @@ M.open_rfc = function()
 		silent = true, -- No command echo
 	})
 
-	vim.keymap.set("n", "<CR>", function()
+	vim.keymap.set("n", config_keys["select"], function()
 		if not validate_state() then
 			return
 		end
@@ -879,7 +1108,7 @@ M.open_rfc = function()
 		silent = true, -- No command echo
 	})
 
-	vim.keymap.set("n", "s", function()
+	vim.keymap.set("n", config_keys["add_to_view"], function()
 		if state.curr_float.type ~= "list" then
 			return
 		end
@@ -900,7 +1129,7 @@ M.open_rfc = function()
 		silent = true, -- No command echo
 	})
 
-	vim.keymap.set("n", "d", function()
+	vim.keymap.set("n", config_keys["delete"], function()
 		if
 			state.curr_float.type ~= "list"
 			and state.curr_float.type ~= "view_list"
@@ -957,7 +1186,7 @@ M.open_rfc = function()
 		silent = true, -- No command echo
 	})
 
-	vim.keymap.set("n", "D", function()
+	vim.keymap.set("n", config_keys["delete_all"], function()
 		if
 			state.curr_float.type ~= "list"
 			and state.curr_float.type ~= "view_list"
@@ -992,7 +1221,7 @@ M.open_rfc = function()
 		end
 	end)
 
-	vim.keymap.set("n", "r", function()
+	vim.keymap.set("n", config_keys["refresh"], function()
 		if not validate_state() then
 			return
 		end
