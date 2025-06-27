@@ -120,11 +120,12 @@ func writeToRfc(name string, data io.ReadCloser, writeToList bool) (int, error) 
 	return int(n), nil
 }
 
-func searchRFCs(query string) (*RFCResponse, error) {
+func searchRFCs(query string, offset int) (*RFCResponse, error) {
 	encodedQuery := url.QueryEscape(query)
 	apiURL := fmt.Sprintf(
-		"https://datatracker.ietf.org/api/v1/doc/document/?format=json&type=rfc&title__icontains=%s",
+		"https://datatracker.ietf.org/api/v1/doc/document/?format=json&type=rfc&title__icontains=%s&offset=%d",
 		encodedQuery,
+		offset,
 	)
 
 	resp, err := http.Get(apiURL)
@@ -551,6 +552,7 @@ func rfcDownloadAll() error {
 
 func main() {
 	rfcSearch := flag.String("rfc", "", "rfc name")
+	rfcSearchOffset := flag.Int("offset", 0, "rfc search offset")
 	rfcSave := flag.Bool("save", false, "save rfc")
 	rfcList := flag.Bool("list", false, "view rfc list")
 	rfcDeleteAll := flag.Bool("delete-all", false, "delete all rfcs")
@@ -561,6 +563,14 @@ func main() {
 	rfcDownloadAllRfc := flag.Bool("download-all", false, "download all rfcs")
 
 	flag.Parse()
+
+	if *rfcSearchOffset < 0 {
+		log.Fatal("offset must be >= 0")
+	}
+
+	if *rfcSearchOffset > 0 && *rfcSearch == "" {
+		log.Fatal("must provide rfc")
+	}
 
 	if *rfcDownloadAllRfc {
 		if err := rfcDownloadAll(); err != nil {
@@ -629,7 +639,7 @@ func main() {
 		log.Fatal("must provide rfc")
 	}
 
-	rfcs, err := searchRFCs(*rfcSearch)
+	rfcs, err := searchRFCs(*rfcSearch, *rfcSearchOffset)
 	if err != nil {
 		log.Fatal(err)
 	}
