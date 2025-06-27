@@ -92,8 +92,8 @@ end
 local delete_buffers_when_closing = false
 
 local footer_default_data = {
-	curr_view = { key = "no view", prefix = "Current view: ", show_fully = true },
-	curr_float = { key = "no float", prefix = "Current float: ", show_fully = false },
+	curr_view = { key = "no view", prefix = "Current view: ", show_fully = false },
+	curr_float = { key = "no float", prefix = "Current float: ", show_fully = true },
 	status = { key = "no status", prefix = "Status: ", show_fully = true },
 }
 
@@ -168,9 +168,15 @@ local foreach_float = function(cb)
 end
 
 local function create_floating_window(config, enter, buf, is_scratch, readonly, modifiable, name)
-	readonly = readonly or false
-	modifiable = modifiable or true
-	enter = enter or false
+	if readonly == nil then
+		readonly = false
+	end
+	if modifiable == nil then
+		modifiable = true
+	end
+	if enter == nil then
+		enter = false
+	end
 	config = config
 		or {
 			relative = "editor",
@@ -193,7 +199,7 @@ local function create_floating_window(config, enter, buf, is_scratch, readonly, 
 
 	add_close_window_autocmd(buf)
 
-	return { buf = buf, win = win, config = config, read_only = readonly, modifiable = modifiable }
+	return { buf = buf, win = win, config = config, readonly = readonly, modifiable = modifiable }
 end
 
 local has_elements = function(list)
@@ -228,7 +234,6 @@ local change_buffer_content = function(float, lines)
 end
 
 local place_colored_shape = function(buf, line, col, hl_group, ns, shape_char)
-	print(line .. " " .. col .. " " .. string.len(shape_char) .. "end_col: " .. (col + string.len(shape_char)))
 	shape_char = shape_char or "█"
 
 	vim.api.nvim_buf_set_extmark(buf, ns, line, col, {
@@ -256,7 +261,9 @@ local change_footer_content = function(footer_keys, display_order)
 
 	vim.api.nvim_buf_clear_namespace(state.floats.footer.buf, state.footer_ns, 0, -1)
 
-	data.footer_data = vim.deepcopy(footer_default_data)
+	if not has_elements(data.footer_data) then
+		data.footer_data = vim.deepcopy(footer_default_data)
+	end
 	if type(footer_keys) == "table" then
 		for key_name, key_value in pairs(footer_keys) do
 			data.footer_data[key_name] = key_value
@@ -336,12 +343,18 @@ local change_footer_content = function(footer_keys, display_order)
 	end
 end
 
-local change_current_window = function(float, type)
+local change_current_window = function(float, type, set_current)
+	if set_current == nil then
+		set_current = true
+	end
+
 	if state.curr_float ~= nil and vim.api.nvim_win_is_valid(state.curr_float.win) then
 		vim.api.nvim_win_set_config(state.curr_float.win, { zindex = 1 })
 	end
 	vim.api.nvim_win_set_config(float.win, { zindex = 2 })
-	vim.api.nvim_set_current_win(float.win)
+	if set_current then
+		vim.api.nvim_set_current_win(float.win)
+	end
 	state.curr_float = float
 	if type ~= nil then
 		state.curr_float.type = type
@@ -352,8 +365,8 @@ local change_current_window = function(float, type)
 		curr_view = "no view"
 	end
 	change_footer_content({
-		curr_view = { key = curr_view, prefix = "Current view: ", show_fully = true },
-		curr_float = { key = state.curr_float.type, prefix = "Current float: ", show_fully = false },
+		curr_view = { key = curr_view, prefix = "Current view: ", show_fully = false },
+		curr_float = { key = state.curr_float.type, prefix = "Current float: ", show_fully = true },
 		status = { key = "no status", prefix = "Status: ", show_fully = true },
 	})
 end
@@ -472,7 +485,7 @@ local add_view = function(title, lines, set_curr_view)
 
 	if set_curr_view then
 		data.curr_view = title
-		change_footer_content({ curr_view = { key = title, prefix = "Current view: ", show_fully = true } })
+		change_footer_content({ curr_view = { key = title, prefix = "Current view: ", show_fully = false } })
 	end
 	if state.view_floats[title] == nil then
 		add_rfc_buffer(title, lines)
@@ -690,7 +703,7 @@ local open_view = function(lines, create)
 					false,
 					state.floats.view.buf,
 					nil,
-					state.floats.view.read_only,
+					state.floats.view.readonly,
 					state.floats.view.modifiable,
 					"view"
 				)
@@ -700,7 +713,7 @@ local open_view = function(lines, create)
 					true,
 					nil,
 					nil,
-					state.floats.view.read_only,
+					state.floats.view.readonly,
 					state.floats.view.modifiable,
 					"view"
 				)
@@ -711,8 +724,13 @@ local open_view = function(lines, create)
 	end
 end
 
-local open_list = function(lines, create)
-	create = create or false
+local open_list = function(lines, create, set_current)
+	if set_current == nil then
+		set_current = true
+	end
+	if create == nil then
+		create = false
+	end
 	if not vim.api.nvim_win_is_valid(state.floats.list.win) then
 		if not create then
 			return
@@ -720,27 +738,27 @@ local open_list = function(lines, create)
 		if vim.api.nvim_buf_is_valid(state.floats.list.buf) then
 			state.floats.list = create_floating_window(
 				window_config.view,
-				false,
+				set_current,
 				state.floats.list.buf,
 				nil,
-				state.floats.list.read_only,
+				state.floats.list.readonly,
 				state.floats.list.modifiable,
 				"list"
 			)
 		else
 			state.floats.list = create_floating_window(
 				window_config.view,
-				true,
+				set_current,
 				nil,
 				nil,
-				state.floats.list.read_only,
+				state.floats.list.readonly,
 				state.floats.list.modifiable,
 				"list"
 			)
 		end
 	end
 
-	change_current_window(state.floats.list, "list")
+	change_current_window(state.floats.list, "list", set_current)
 
 	if lines ~= nil then
 		data.list_data = lines
@@ -754,8 +772,14 @@ local open_list = function(lines, create)
 	change_buffer_content(state.curr_float, data.list_data)
 end
 
-local open_search = function(lines, create)
-	create = create or false
+local open_search = function(lines, create, set_current)
+	if set_current == nil then
+		set_current = true
+	end
+
+	if create == nil then
+		create = false
+	end
 	if not vim.api.nvim_win_is_valid(state.floats.search.win) then
 		if not create then
 			return
@@ -763,20 +787,20 @@ local open_search = function(lines, create)
 		if vim.api.nvim_buf_is_valid(state.floats.search.buf) then
 			state.floats.search = create_floating_window(
 				window_config.view,
-				false,
+				set_current,
 				state.floats.search.buf,
 				nil,
-				state.floats.search.read_only,
+				state.floats.search.readonly,
 				state.floats.search.modifiable,
 				"search"
 			)
 		else
 			state.floats.search = create_floating_window(
 				window_config.view,
-				true,
+				set_current,
 				nil,
 				nil,
-				state.floats.search.read_only,
+				state.floats.search.readonly,
 				state.floats.search.modifiable,
 				"search"
 			)
@@ -786,7 +810,7 @@ local open_search = function(lines, create)
 		data.search_data = lines
 	end
 
-	change_current_window(state.floats.search, "search")
+	change_current_window(state.floats.search, "search", set_current)
 	change_buffer_content(state.curr_float, data.search_data)
 end
 
@@ -799,7 +823,7 @@ local open_search_header = function(create)
 				true,
 				nil,
 				nil,
-				state.floats.search_header.read_only,
+				state.floats.search_header.readonly,
 				state.floats.search_header.modifiable,
 				"search_header"
 			)
@@ -817,7 +841,7 @@ local open_search_header = function(create)
 				true,
 				nil,
 				nil,
-				state.floats.search_header.read_only,
+				state.floats.search_header.readonly,
 				state.floats.search_header.modifiable,
 				"search_header"
 			)
@@ -832,10 +856,10 @@ local open_search_header = function(create)
 	watch_buffer_changes(state.floats.search_header.buf, function(buf)
 		local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
 		if state.curr_float.type == "list" then
-			open_list(run_go_plugin({ "list", "filter" }, { nil, table.concat(lines) }))
+			open_list(run_go_plugin({ "list", "filter" }, { nil, table.concat(lines) }), nil, false)
 		elseif state.curr_float.type == "search" then
 			run_go_plugin({ "rfc" }, { table.concat(lines) })
-			open_search({ "searching for " .. table.concat(lines) })
+			open_search({ "searching for " .. table.concat(lines) }, nil, false)
 		end
 	end, {
 		debounce_ms = 500, -- Only trigger after 500ms of no changes
@@ -852,7 +876,7 @@ local open_footer = function(create)
 				true,
 				nil,
 				nil,
-				state.floats.footer.read_only,
+				state.floats.footer.readonly,
 				state.floats.footer.modifiable,
 				"footer"
 			)
@@ -880,7 +904,7 @@ local open_footer = function(create)
 				true,
 				nil,
 				nil,
-				state.floats.footer.read_only,
+				state.floats.footer.readonly,
 				state.floats.footer.modifiable,
 				"footer"
 			)
@@ -912,7 +936,7 @@ local open_view_list = function(create)
 				false,
 				state.floats.view_list.buf,
 				nil,
-				state.floats.view_list.read_only,
+				state.floats.view_list.readonly,
 				state.floats.view_list.modifiable,
 				"view_list"
 			)
@@ -922,7 +946,7 @@ local open_view_list = function(create)
 				true,
 				nil,
 				nil,
-				state.floats.view_list.read_only,
+				state.floats.view_list.readonly,
 				state.floats.view_list.modifiable,
 				"view_list"
 			)
@@ -987,8 +1011,8 @@ M.open_rfc = function()
 			curr_view = "no view"
 		end
 		change_footer_content({
-			curr_view = { key = curr_view, prefix = "Current view: ", show_fully = true },
-			curr_float = { key = state.curr_float.type, prefix = "Current float: ", show_fully = false },
+			curr_view = { key = curr_view, prefix = "Current view: ", show_fully = false },
+			curr_float = { key = state.curr_float.type, prefix = "Current float: ", show_fully = true },
 		})
 	else
 		open_search_header(true)
@@ -1058,10 +1082,10 @@ M.open_rfc = function()
 		watch_buffer_changes(state.floats.search_header.buf, function(buf)
 			local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
 			if state.curr_float.type == "list" then
-				open_list(run_go_plugin({ "list", "filter" }, { nil, table.concat(lines) }))
+				open_list(run_go_plugin({ "list", "filter" }, { nil, table.concat(lines) }), nil, false)
 			elseif state.curr_float.type == "search" then
 				run_go_plugin({ "rfc" }, { table.concat(lines) })
-				open_search({ "searching for " .. table.concat(lines) })
+				open_search({ "searching for " .. table.concat(lines) }, nil, false)
 			end
 		end, {
 			debounce_ms = 500, -- Only trigger after 500ms of no changes
