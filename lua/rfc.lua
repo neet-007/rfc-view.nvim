@@ -1,12 +1,17 @@
 local M = {}
 
 -- TODO: add way to refresh the recently changed values
+-- TODO: make search better and add way to make it into pages you can scroll through
+-- TODO: make better rendering functions
+-- TODO: make footer look better
 
 local state = {
 	floats = {},
 	curr_float = {},
 	view_floats = {},
 	footer_ns = vim.api.nvim_create_namespace("footer_namespace"),
+	last_search_query = "",
+	search_offset = 0,
 }
 
 local skip_win_close = false
@@ -125,6 +130,7 @@ local default_keys = {
 	refresh = "r",
 	delete_all = "D",
 	view_list = "z",
+	next_search = "ns",
 }
 
 local config_keys = {}
@@ -200,6 +206,14 @@ local function create_floating_window(config, enter, buf, is_scratch, readonly, 
 	add_close_window_autocmd(buf)
 
 	return { buf = buf, win = win, config = config, readonly = readonly, modifiable = modifiable }
+end
+
+local count_elements = function(list)
+	local count = 0
+	for _ in pairs(list) do
+		count = count + 1
+	end
+	return count
 end
 
 local has_elements = function(list)
@@ -367,7 +381,6 @@ local change_current_window = function(float, type, set_current)
 	change_footer_content({
 		curr_view = { key = curr_view, prefix = "Current view: ", show_fully = false },
 		curr_float = { key = state.curr_float.type, prefix = "Current float: ", show_fully = true },
-		status = { key = "no status", prefix = "Status: ", show_fully = true },
 	})
 end
 
@@ -570,7 +583,7 @@ local go_async_command = function(command, command_args, output_callback, error_
 	return true
 end
 
---- @alias PluginCommands "rfc" | "save" | "list" | "view" | "get" | "delete" | "filter" | "delete-all" | "download-all"
+--- @alias PluginCommands "rfc" | "save" | "list" | "view" | "get" | "delete" | "filter" | "delete-all" | "download-all" | "offset"
 
 --- @param commands PluginCommands[]
 --- @param args (string|nil)[] # arguments for each flag, same order, nil to skip
@@ -627,7 +640,12 @@ local run_go_plugin = function(commands, args)
 			if last_command_errors ~= nil and #last_command_errors > 0 then
 				vim.notify("Search errors:\n" .. table.concat(last_command_errors, "\n"), vim.log.levels.WARN)
 			else
-				table.remove(data.search_data, 1)
+				if state.search_offset == 0 then
+					table.remove(data.search_data, 1)
+				else
+					table.remove(data.search_data, state.search_offset + 1)
+				end
+				state.search_offset = count_elements(data.search_data)
 				change_buffer_content(state.floats.search, data.search_data)
 				vim.notify("Search exited with code: " .. exit_code, vim.log.levels.INFO)
 			end
@@ -858,7 +876,8 @@ local open_search_header = function(create)
 		if state.curr_float.type == "list" then
 			open_list(run_go_plugin({ "list", "filter" }, { nil, table.concat(lines) }), nil, false)
 		elseif state.curr_float.type == "search" then
-			run_go_plugin({ "rfc" }, { table.concat(lines) })
+			state.last_search = table.concat(lines)
+			run_go_plugin({ "rfc" }, { state.last_search })
 			open_search({ "searching for " .. table.concat(lines) }, nil, false)
 		end
 	end, {
@@ -1061,6 +1080,17 @@ M.open_rfc = function()
 		silent = true, -- No command echo
 	})
 
+	vim.keymap.set("n", config_keys["next_search"], function()
+		if not validate_state() or state.curr_float.type ~= "search" then
+			return
+		end
+
+		run_go_plugin({ "rfc", "offset" }, { state.last_search, tostring(state.search_offset) })
+	end, {
+		noremap = true, -- Non-recursive
+		silent = true, -- No command echo
+	})
+
 	vim.keymap.set("n", config_keys["view_list"], function()
 		if not validate_state() then
 			return
@@ -1084,7 +1114,8 @@ M.open_rfc = function()
 			if state.curr_float.type == "list" then
 				open_list(run_go_plugin({ "list", "filter" }, { nil, table.concat(lines) }), nil, false)
 			elseif state.curr_float.type == "search" then
-				run_go_plugin({ "rfc" }, { table.concat(lines) })
+				state.last_search = table.concat(lines)
+				run_go_plugin({ "rfc" }, { state.last_search })
 				open_search({ "searching for " .. table.concat(lines) }, nil, false)
 			end
 		end, {
