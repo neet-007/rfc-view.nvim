@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -17,7 +18,23 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"unicode"
 )
+
+const (
+	SCORE_GAP_LEADING       = -0.005
+	SCORE_GAP_TRAILING      = -0.005
+	SCORE_GAP_INNER         = -0.01
+	SCORE_MATCH_CONSECUTIVE = 1.0
+	SCORE_MATCH_SLASH       = 0.9
+	SCORE_MATCH_WORD        = 0.8
+	SCORE_MATCH_CAPITAL     = 0.7
+	SCORE_MATCH_DOT         = 0.6
+	MATCH_MAX_LENGTH        = 1024
+)
+
+var SCORE_MAX = math.Inf(1)
+var SCORE_MIN = math.Inf(-1)
 
 type RFC struct {
 	ID       int    `json:"id"`
@@ -140,10 +157,10 @@ func SearchRFCs(query string, offset int) (*RFCResponse, error) {
 	)
 
 	resp, err := http.Get(apiURL)
+	defer resp.Body.Close()
 	if err != nil {
 		return nil, fmt.Errorf("HTTP request failed: %v", err)
 	}
-	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -198,19 +215,18 @@ func GetRfc(rfc RFC, save bool) (int, error) {
 
 	url := "https://www.rfc-editor.org/rfc/" + rfc.RFC + ".txt"
 	res, err := http.Get(url)
+	defer res.Body.Close()
 	if err != nil {
 		return 0, err
 	}
 
 	if save {
 		n, err := writeToRfc(rfc.PathName, res.Body, true)
-		res.Body.Close()
 		if err != nil {
 			return 0, err
 		}
 		return n, nil
 	}
-	res.Body.Close()
 
 	return 0, nil
 }
@@ -274,6 +290,163 @@ func buildRfcListFromDir() error {
 	return nil
 }
 
+func preComputeBonus(s string) []float64 {
+	bonus := make([]float64, len(s))
+	lastChar := filepath.Separator
+
+	for i := 0; i < len(s); i++ {
+		thisChar := s[i]
+
+		switch {
+		case lastChar == filepath.Separator:
+			bonus[i] = SCORE_MATCH_SLASH
+		case lastChar == '_' || lastChar == '-' || lastChar == ' ':
+			bonus[i] = SCORE_MATCH_WORD
+		case lastChar == '.':
+			bonus[i] = SCORE_MATCH_DOT
+		case unicode.IsLower(lastChar) && unicode.IsUpper(rune(thisChar)):
+			bonus[i] = SCORE_MATCH_CAPITAL
+		}
+
+		lastChar = rune(thisChar)
+	}
+
+	return bonus
+}
+
+func compute(s1 string, s2 string, D [][]float64, M [][]float64) {
+	bonus := preComputeBonus(s2)
+
+	n := len(s1)
+	m := len(s2)
+	s1Lower := strings.ToLower(s1)
+	s2Lower := strings.ToLower(s2)
+
+	for i := 0; i < n; i++ {
+		prevScore := SCORE_MIN
+		gap := SCORE_GAP_INNER
+		if i == n-1 {
+			gap = SCORE_GAP_TRAILING
+		}
+		s1Char := s1Lower[i]
+
+		for j := 0; j < m; j++ {
+			if s1Char == s2Lower[j] {
+				score := SCORE_MIN
+				if i == 0 {
+					score = ((float64(j)) * SCORE_GAP_LEADING) + bonus[j]
+				} else if j > 0 {
+					a := M[i-1][j-1] + bonus[j]
+					b := D[i-1][j-1] + SCORE_MATCH_CONSECUTIVE
+					score = max(a, b)
+				}
+				D[i][j] = score
+				prevScore = max(score, prevScore+gap)
+				M[i][j] = prevScore
+			} else {
+				D[i][j] = SCORE_MIN
+				prevScore += gap
+				M[i][j] = prevScore
+			}
+		}
+	}
+}
+
+func Fzy(filter string, list []string) []string {
+	n := len(filter)
+
+	ch := make(chan struct {
+		score float64
+		s     string
+	}, len(list))
+	tokens := make(chan struct{}, 20)
+
+	wg := sync.WaitGroup{}
+	for _, s2 := range list {
+		wg.Add(1)
+		go func(s2 string) {
+			tokens <- struct{}{}
+			defer func() {
+				<-tokens
+				wg.Done()
+			}()
+			m := len(s2)
+
+			if n == 0 || m == 0 || n > MATCH_MAX_LENGTH || m > MATCH_MAX_LENGTH {
+				ch <- struct {
+					score float64
+					s     string
+				}{SCORE_MIN, s2}
+				return
+			}
+
+			if n == m {
+				ch <- struct {
+					score float64
+					s     string
+				}{SCORE_MAX, s2}
+				return
+			}
+
+			D := make([][]float64, n)
+			M := make([][]float64, n)
+
+			for i := 0; i < n; i++ {
+				D[i] = make([]float64, m)
+				M[i] = make([]float64, m)
+			}
+
+			compute(filter, s2, D, M)
+
+			ch <- struct {
+				score float64
+				s     string
+			}{M[n-1][m-1], s2}
+		}(s2)
+	}
+
+	wg.Wait()
+	close(ch)
+
+	scoreList := make([]struct {
+		score float64
+		s     string
+	}, 0, len(list))
+
+	for tempStruct := range ch {
+		scoreList = append(scoreList, struct {
+			score float64
+			s     string
+		}{tempStruct.score, tempStruct.s})
+	}
+
+	slices.SortFunc(scoreList, func(a, b struct {
+		score float64
+		s     string
+	}) int {
+		if a.score == b.score {
+			return 0
+		}
+		if a.score > b.score {
+			return -1
+		}
+		return 1
+	})
+
+	for i := len(scoreList) - 1; i >= 0; i-- {
+		if scoreList[i].score == SCORE_MIN {
+			scoreList = slices.Delete(scoreList, i, i+1)
+		}
+	}
+
+	retList := make([]string, 0, len(scoreList))
+	for _, score := range scoreList {
+		retList = append(retList, score.s)
+	}
+
+	return retList
+}
+
 func ListRfc(filter string) {
 	listPath := filepath.Join(RfcDir, "rfc_list") + ".txt"
 
@@ -283,66 +456,30 @@ func ListRfc(filter string) {
 	}
 	defer file.Close()
 
+	list := make([]string, 0)
 	scanner := bufio.NewScanner(file)
-	lineCount := 0
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if filter == "" {
-			lineCount++
-		} else {
-			split := strings.Split(line, "::")
-			if len(split) != 2 {
-				log.Printf("filter invalid %s", line)
-				continue
-			}
-			lowerLine := strings.ToLower(split[1])
-			lowerFilter := strings.ToLower(filter)
-			if !strings.Contains(lowerLine, lowerFilter) {
-				continue
-			}
-			lineCount++
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		log.Printf("Error reading file for count:", err)
-		return
-	}
-
-	fmt.Printf("Total line count: %d\n", lineCount)
-
-	_, err = file.Seek(0, io.SeekStart)
-	if err != nil {
-		log.Printf("Error seeking file to beginning:", err)
-		return
-	}
-
-	scanner = bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == "" {
 			continue
 		}
-		if filter == "" {
-			fmt.Println(line)
-		} else {
-			split := strings.Split(line, "::")
-			if len(split) != 2 {
-				log.Printf("filter invalid %s", line)
-				continue
-			}
-			lowerLine := strings.ToLower(split[1])
-			lowerFilter := strings.ToLower(filter)
-			if !strings.Contains(lowerLine, lowerFilter) {
-				continue
-			}
-			fmt.Println(line)
-		}
+		list = append(list, line)
 	}
 
 	if err := scanner.Err(); err != nil {
 		log.Fatalf("error reading file: %s", err)
+	}
+
+	var res []string
+	if filter == "" {
+		res = list
+	} else {
+		res = Fzy(filter, list)
+	}
+
+	fmt.Printf("Total line count: %d\n", len(res))
+	for _, line := range res {
+		fmt.Println(line)
 	}
 }
 
@@ -497,10 +634,10 @@ func DeleteAllRfcs() error {
 func fetchRFCList() ([]RFC, error) {
 	indexURL := "https://www.rfc-editor.org/rfc/rfc-index.txt"
 	resp, err := http.Get(indexURL)
+	defer resp.Body.Close()
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
 
 	scanner := bufio.NewScanner(resp.Body)
 	re := regexp.MustCompile(`^(\d{4})\s+(.*?)\.\s`)
@@ -544,6 +681,7 @@ func downloadRFC(rfc RFC) error {
 	}
 
 	resp, err := http.Get(url)
+	defer resp.Body.Close()
 	if resp.StatusCode == 404 {
 		return newNotFound(rfc.RFC)
 	} else if err != nil || resp.StatusCode != 200 {
@@ -551,7 +689,6 @@ func downloadRFC(rfc RFC) error {
 	}
 
 	_, err = writeToRfc(rfc.PathName, resp.Body, false)
-	resp.Body.Close()
 	if err != nil {
 		return err
 	}
@@ -559,6 +696,7 @@ func downloadRFC(rfc RFC) error {
 	return nil
 }
 
+// TODO: consider what happens when it crashes
 func RfcDownloadAll() error {
 	fmt.Println("Downloading RFC index...")
 	rfcs, err := fetchRFCList()
@@ -619,12 +757,18 @@ func RfcDownloadAll() error {
 
 	defer f.Close()
 
+	w := bufio.NewWriter(f)
+	defer w.Flush()
+
 	for _, rfc := range rfcs {
 		if blackList[rfc.PathName] {
 			continue
 		}
 
-		if _, err := f.WriteString(rfc.PathName + "\n"); err != nil {
+		if _, err := w.WriteString(rfc.PathName); err != nil {
+			return err
+		}
+		if err := w.WriteByte('\n'); err != nil {
 			return err
 		}
 	}
@@ -663,7 +807,6 @@ func main() {
 	}
 
 	if *rfcList {
-		buildRfcListFromDir()
 		ListRfc(*rfcListFilter)
 		return
 	}
