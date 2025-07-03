@@ -287,6 +287,10 @@ func buildRfcListFromDir() error {
 		return err
 	}
 
+	for _, name := range names {
+		fmt.Println(name)
+	}
+
 	return nil
 }
 
@@ -777,15 +781,16 @@ func RfcDownloadAll() error {
 }
 
 func main() {
-	rfcSearch := flag.String("rfc", "", "rfc name")
-	rfcSearchOffset := flag.Int("offset", 0, "rfc search offset")
+	rfcSearch := flag.String("rfc", "", "search rfc online by name")
+	rfcSearchOffset := flag.Int("offset", 0, "offset for online search")
 	rfcSave := flag.Bool("save", false, "save rfc")
 	rfcList := flag.Bool("list", false, "view rfc list")
+	rfcListFilter := flag.String("filter", "", "filter for rfc list")
+	rfcBuildList := flag.Bool("build-list", false, "build rfc list from directory")
 	rfcDeleteAll := flag.Bool("delete-all", false, "delete all rfcs")
-	rfcListFilter := flag.String("filter", "", "filter rfc list")
-	rfcView := flag.String("view", "", "view rfc")
-	rfcGet := flag.String("get", "", "get rfc")
-	rfcDelete := flag.String("delete", "", "delete rfc")
+	rfcView := flag.String("view", "", "view rfc by name")
+	rfcGet := flag.String("get", "", "download rfc by name")
+	rfcDelete := flag.String("delete", "", "delete rfc by name")
 	rfcDownloadAllRfc := flag.Bool("download-all", false, "download all rfcs")
 
 	flag.Parse()
@@ -800,6 +805,14 @@ func main() {
 
 	if *rfcDownloadAllRfc {
 		if err := RfcDownloadAll(); err != nil {
+			log.Fatal(err)
+		}
+
+		return
+	}
+
+	if *rfcBuildList {
+		if err := buildRfcListFromDir(); err != nil {
 			log.Fatal(err)
 		}
 

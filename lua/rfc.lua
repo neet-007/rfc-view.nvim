@@ -1,9 +1,10 @@
 local M = {}
 
 -- TODO: add way to refresh the recently changed values
--- TODO: make search better and add way to make it into pages you can scroll through
+-- TODO: make search better and option to make it into pages you can scroll through
 -- TODO: make better rendering functions
 -- TODO: make footer look better
+-- TODO: maybe make all go commands async
 
 local state = {
 	floats = {},
@@ -128,6 +129,7 @@ local default_keys = {
 	add_to_view = "s",
 	delete = "d",
 	refresh = "r",
+	hard_refresh = "R",
 	delete_all = "D",
 	view_list = "z",
 	next_search = "ns",
@@ -583,7 +585,7 @@ local go_async_command = function(command, command_args, output_callback, error_
 	return true
 end
 
---- @alias PluginCommands "rfc" | "save" | "list" | "view" | "get" | "delete" | "filter" | "delete-all" | "download-all" | "offset"
+--- @alias PluginCommands "rfc" | "save" | "list" | "view" | "get" | "delete" | "filter" | "delete-all" | "download-all" | "offset" | "build-list"
 
 --- @param commands PluginCommands[]
 --- @param args (string|nil)[] # arguments for each flag, same order, nil to skip
@@ -1289,6 +1291,16 @@ M.open_rfc = function()
 			open_view()
 		end
 	end)
+
+	vim.keymap.set("n", config_keys["hard_refresh"], function()
+		if not validate_state() then
+			return
+		end
+
+		if state.curr_float.type == "list" then
+			open_list(run_go_plugin({ "build-list" }, { nil }))
+		end
+	end)
 end
 
 M.close_rfc = function()
@@ -1303,6 +1315,20 @@ M.close_rfc = function()
 			delete_buffers_when_closing
 			and (not (string.sub(name, 1, #"rfc") == "rfc") and float.buf and vim.api.nvim_buf_is_valid(float.buf))
 		then
+			vim.api.nvim_buf_delete(float.buf, { force = true })
+		end
+	end)
+end
+
+M.delete_buffers = function(delete_rfc_buffers)
+	foreach_float(function(name, float)
+		if float.win and vim.api.nvim_win_is_valid(float.win) then
+			vim.api.nvim_win_close(float.win, true)
+		end
+		if float.buf and vim.api.nvim_buf_is_valid(float.buf) then
+			if string.sub(name, 1, #"rfc") == "rfc" and not delete_rfc_buffers then
+				return
+			end
 			vim.api.nvim_buf_delete(float.buf, { force = true })
 		end
 	end)
