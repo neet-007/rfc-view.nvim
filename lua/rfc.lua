@@ -3,7 +3,7 @@ local M = {}
 -- TODO: add way to refresh the recently changed values
 -- TODO: make search better and option to make it into pages you can scroll through
 -- TODO: make better rendering functions
--- TODO: make footer look better
+-- TODO: make footer look better and handle its state better
 -- TODO: maybe make all go commands async
 
 local state = {
@@ -111,11 +111,17 @@ local data = {
 	search_data = { "nothing to search" },
 	fetching_view_data = {},
 	footer_data = {},
+	view_temp_data = {},
 }
 
 local is_searching = false
 local is_downloading = false
 local is_downloading_all = false
+local is_building_list = false
+local is_deleting = false
+local is_deleting_all = false
+local is_viewing = false
+local is_listing = false
 local window_config = create_window_configurations()
 
 local original_mappings = {}
@@ -512,32 +518,6 @@ local add_view = function(title, lines, set_curr_view)
 end
 
 local go_async_command = function(command, command_args, output_callback, error_callback, on_completion_callback)
-	if command == "search" then
-		if is_searching then
-			vim.notify("Search is already running. Please wait.", vim.log.levels.WARN)
-			return false
-		else
-			is_searching = true
-		end
-	elseif command == "download-all" then
-		if is_downloading_all then
-			vim.notify("Downloading all is already running. Please wait.", vim.log.levels.WARN)
-			return false
-		else
-			is_downloading_all = true
-		end
-	elseif command == "get" then
-		if is_downloading then
-			vim.notify("Downloading is already running. Please wait.", vim.log.levels.WARN)
-			return false
-		else
-			is_downloading = true
-		end
-	else
-		vim.notify("Invalid command: " .. command, vim.log.levels.WARN)
-		return false
-	end
-
 	vim.notify("Starting command: " .. command .. " " .. table.concat(command_args, " "), vim.log.levels.INFO)
 
 	local stderr_buffer = {}
@@ -551,23 +531,12 @@ local go_async_command = function(command, command_args, output_callback, error_
 
 		on_stderr = vim.schedule_wrap(function(job_id, data_arg, event)
 			if error_callback ~= nil then
-				output_callback(job_id, data_arg, event)
+				error_callback(job_id, data_arg, event)
 			end
 		end),
 
 		on_exit = vim.schedule_wrap(function(_, exit_code, _)
 			vim.notify("Command finished." .. command .. " " .. "Exit code: " .. exit_code, vim.log.levels.INFO)
-
-			if command == "search" then
-				is_searching = false
-				M.search_exit_code = exit_code
-			elseif command == "download-all" then
-				is_downloading_all = false
-				M.download_all_exit_code = exit_code
-			elseif command == "get" then
-				is_downloading = false
-				M.get_exit_code = exit_code
-			end
 
 			if #table.concat(stderr_buffer) > 0 then
 				vim.notify(
@@ -608,9 +577,12 @@ local run_go_plugin = function(commands, args)
 			vim.notify("Download all is already running. Please wait.", vim.log.levels.WARN)
 			return {}
 		end
+		is_downloading_all = true
 
 		change_footer_content({ status = { key = "Downloading all rfcs", prefix = "Status: ", show_fully = true } })
 		go_async_command("download-all", cmd_args, nil, nil, function(exit_code, _, last_command_errors)
+			is_downloading_all = false
+			M.download_all_exit_code = exit_code
 			change_footer_content({ status = { key = "no status", prefix = "Status: ", show_fully = true } })
 			if last_command_errors ~= nil and #last_command_errors > 0 then
 				vim.notify("Download all errors:\n" .. table.concat(last_command_errors, "\n"), vim.log.levels.WARN)
@@ -627,6 +599,7 @@ local run_go_plugin = function(commands, args)
 			vim.notify("Search is already running. Please wait.", vim.log.levels.WARN)
 			return {}
 		end
+		is_searching = true
 
 		change_footer_content({ status = { key = "Searching for rfcs", prefix = "Status: ", show_fully = true } })
 		go_async_command("search", cmd_args, function(_, data_arg, _)
@@ -638,6 +611,8 @@ local run_go_plugin = function(commands, args)
 		end, function(_, data_arg, _)
 			vim.notify("Error: " .. table.concat(data_arg, "\n"), vim.log.levels.WARN)
 		end, function(exit_code, _, last_command_errors)
+			is_searching = false
+			M.search_exit_code = exit_code
 			change_footer_content({ status = { key = "no status", prefix = "Status: ", show_fully = true } })
 			if last_command_errors ~= nil and #last_command_errors > 0 then
 				vim.notify("Search errors:\n" .. table.concat(last_command_errors, "\n"), vim.log.levels.WARN)
@@ -658,6 +633,7 @@ local run_go_plugin = function(commands, args)
 			vim.notify("Downloading is already running. Please wait.", vim.log.levels.WARN)
 			return {}
 		end
+		is_downloading = true
 
 		change_footer_content({
 			status = { key = "Downloading rfc " .. cmd_args[3], prefix = "Status: ", show_fully = true },
@@ -669,6 +645,8 @@ local run_go_plugin = function(commands, args)
 		end, function(_, data_arg, _)
 			vim.notify("Error: " .. table.concat(data_arg, "\n"), vim.log.levels.WARN)
 		end, function(exit_code, _, last_command_errors)
+			is_downloading = false
+			M.get_exit_code = exit_code
 			change_footer_content({ status = { key = "no status", prefix = "Status: ", show_fully = true } })
 			if last_command_errors ~= nil and #last_command_errors > 0 then
 				vim.notify("Download errors:\n" .. table.concat(last_command_errors, "\n"), vim.log.levels.WARN)
@@ -680,17 +658,137 @@ local run_go_plugin = function(commands, args)
 			data.fetching_view_data = {}
 		end)
 		return {}
+	elseif commands[1] == "list" then
+		if is_listing then
+			vim.notify("Listing is already running. Please wait.", vim.log.levels.WARN)
+			return {}
+		end
+		is_listing = true
+
+		change_footer_content({ status = { key = "Listing rfcs", prefix = "Status: ", show_fully = true } })
+		go_async_command("list", cmd_args, function(_, data_arg, _)
+			for _, line in ipairs(data_arg) do
+				if line and line:match("%S") then
+					table.insert(data.list_data, line)
+				end
+			end
+		end, function(_, data_arg, _)
+			vim.notify("Error: " .. table.concat(data_arg, "\n"), vim.log.levels.WARN)
+		end, function(exit_code, _, last_command_errors)
+			is_listing = false
+			M.list_exit_code = exit_code
+			change_footer_content({ status = { key = "no status", prefix = "Status: ", show_fully = true } })
+			if last_command_errors ~= nil and #last_command_errors > 0 then
+				vim.notify("List errors:\n" .. table.concat(last_command_errors, "\n"), vim.log.levels.WARN)
+			else
+				vim.notify("List exited with code: " .. exit_code, vim.log.levels.INFO)
+			end
+			table.remove(data.list_data, 1)
+			change_buffer_content(state.floats.list, data.list_data)
+		end)
+		return {}
+	elseif commands[1] == "view" then
+		if is_viewing then
+			vim.notify("Viewing is already running. Please wait.", vim.log.levels.WARN)
+			return {}
+		end
+		is_viewing = true
+
+		change_footer_content({ status = { key = "Viewing rfc", prefix = "Status: ", show_fully = true } })
+		go_async_command("view", cmd_args, function(_, data_arg, _)
+			for _, line in ipairs(data_arg) do
+				table.insert(data.view_temp_data, line)
+			end
+		end, function(_, data_arg, _)
+			vim.notify("Error: " .. table.concat(data_arg, "\n"), vim.log.levels.WARN)
+		end, function(exit_code, _, last_command_errors)
+			is_viewing = false
+			M.view_exit_code = exit_code
+			change_footer_content({ status = { key = "no status", prefix = "Status: ", show_fully = true } })
+			if last_command_errors ~= nil and #last_command_errors > 0 then
+				vim.notify("View errors:\n" .. table.concat(last_command_errors, "\n"), vim.log.levels.WARN)
+			else
+				add_view(cmd_args[3], data.view_temp_data)
+				vim.notify("View exited with code: " .. exit_code, vim.log.levels.INFO)
+			end
+			data.view_temp_data = {}
+		end)
+		return {}
+	elseif commands[1] == "delete" then
+		if is_deleting then
+			vim.notify("Deleting is already running. Please wait.", vim.log.levels.WARN)
+			return {}
+		end
+		is_deleting = true
+
+		change_footer_content({ status = { key = "Deleting rfc", prefix = "Status: ", show_fully = true } })
+		go_async_command("delete", cmd_args, nil, function(_, data_arg, _)
+			vim.notify("Error: " .. table.concat(data_arg, "\n"), vim.log.levels.WARN)
+		end, function(exit_code, _, last_command_errors)
+			is_deleting = false
+			M.delete_exit_code = exit_code
+			change_footer_content({ status = { key = "no status", prefix = "Status: ", show_fully = true } })
+			if last_command_errors ~= nil and #last_command_errors > 0 then
+				vim.notify("Delete errors:\n" .. table.concat(last_command_errors, "\n"), vim.log.levels.WARN)
+			else
+				vim.notify("Delete exited with code: " .. exit_code, vim.log.levels.INFO)
+			end
+		end)
+		return {}
+	elseif commands[1] == "delete-all" then
+		if is_deleting_all then
+			vim.notify("Deleting all is already running. Please wait.", vim.log.levels.WARN)
+			return {}
+		end
+		is_deleting_all = true
+
+		change_footer_content({ status = { key = "Deleting all rfcs", prefix = "Status: ", show_fully = true } })
+		go_async_command("delete-all", cmd_args, nil, function(_, data_arg, _)
+			vim.notify("Error: " .. table.concat(data_arg, "\n"), vim.log.levels.WARN)
+		end, function(exit_code, _, last_command_errors)
+			is_deleting_all = false
+			M.delete_all_exit_code = exit_code
+			change_footer_content({ status = { key = "no status", prefix = "Status: ", show_fully = true } })
+			if last_command_errors ~= nil and #last_command_errors > 0 then
+				vim.notify("Delete all errors:\n" .. table.concat(last_command_errors, "\n"), vim.log.levels.WARN)
+			else
+				vim.notify("Delete all exited with code: " .. exit_code, vim.log.levels.INFO)
+			end
+		end)
+		return {}
+	elseif commands[1] == "build-list" then
+		if is_building_list then
+			vim.notify("Building list is already running. Please wait.", vim.log.levels.WARN)
+			return {}
+		end
+		is_building_list = true
+
+		change_footer_content({ status = { key = "Building list", prefix = "Status: ", show_fully = true } })
+		go_async_command("build-list", cmd_args, function(_, data_arg, _)
+			for _, line in ipairs(data_arg) do
+				if line and line:match("%S") then
+					table.insert(data.list_data, line)
+				end
+			end
+		end, function(_, data_arg, _)
+			vim.notify("Error: " .. table.concat(data_arg, "\n"), vim.log.levels.WARN)
+		end, function(exit_code, _, last_command_errors)
+			is_building_list = false
+			M.build_list_exit_code = exit_code
+			change_footer_content({ status = { key = "no status", prefix = "Status: ", show_fully = true } })
+			if last_command_errors ~= nil and #last_command_errors > 0 then
+				vim.notify("Build list errors:\n" .. table.concat(last_command_errors, "\n"), vim.log.levels.WARN)
+			else
+				vim.notify("Build list exited with code: " .. exit_code, vim.log.levels.INFO)
+			end
+			table.remove(data.list_data, 1)
+			change_buffer_content(state.floats.list, data.list_data)
+		end)
+		return {}
+	else
+		vim.notify("Invalid command: " .. commands[1], vim.log.levels.WARN)
+		return {}
 	end
-
-	local result = vim.system(cmd_args, { text = true }):wait()
-
-	if result.stderr and #result.stderr > 0 then
-		vim.api.nvim_echo({
-			{ "Go plugin produced stderr output: " .. result.stderr, "Error" },
-		}, true, {})
-	end
-
-	return vim.split(result.stdout or "", "\n")
 end
 
 local open_view = function(lines, create)
@@ -783,7 +881,7 @@ local open_list = function(lines, create, set_current)
 	if lines ~= nil then
 		data.list_data = lines
 	elseif not has_elements(data.list_data) then
-		data.list_data = run_go_plugin({ "list" }, { nil })
+		run_go_plugin({ "list" }, { nil })
 	end
 	if not has_elements(data.list_data) then
 		data.list_data = { "nothing to list" }
@@ -876,7 +974,8 @@ local open_search_header = function(create)
 	watch_buffer_changes(state.floats.search_header.buf, function(buf)
 		local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
 		if state.curr_float.type == "list" then
-			open_list(run_go_plugin({ "list", "filter" }, { nil, table.concat(lines) }), nil, false)
+			run_go_plugin({ "list", "filter" }, { nil, table.concat(lines) })
+			open_list({ "Getting rfcs..." }, nil, false)
 		elseif state.curr_float.type == "search" then
 			state.last_search = table.concat(lines)
 			run_go_plugin({ "rfc" }, { state.last_search })
@@ -1031,10 +1130,12 @@ M.open_rfc = function()
 		if curr_view == "__NONE__" then
 			curr_view = "no view"
 		end
+		--[[
 		change_footer_content({
 			curr_view = { key = curr_view, prefix = "Current view: ", show_fully = false },
 			curr_float = { key = state.curr_float.type, prefix = "Current float: ", show_fully = true },
 		})
+		--]]
 	else
 		open_search_header(true)
 		open_footer(true)
@@ -1114,7 +1215,8 @@ M.open_rfc = function()
 		watch_buffer_changes(state.floats.search_header.buf, function(buf)
 			local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
 			if state.curr_float.type == "list" then
-				open_list(run_go_plugin({ "list", "filter" }, { nil, table.concat(lines) }), nil, false)
+				run_go_plugin({ "list", "filter" }, { nil, table.concat(lines) })
+				open_list({ "Getting rfcs..." }, nil, false)
 			elseif state.curr_float.type == "search" then
 				state.last_search = table.concat(lines)
 				run_go_plugin({ "rfc" }, { state.last_search })
@@ -1144,9 +1246,7 @@ M.open_rfc = function()
 				end
 
 				local lines = vim.api.nvim_buf_get_lines(state.curr_float.buf, 0, -1, false)
-				local new_lines = run_go_plugin({ "view" }, { lines[cursor_info[1]] })
-
-				add_view(lines[cursor_info[1]], new_lines)
+				run_go_plugin({ "view" }, { lines[cursor_info[1]] })
 			end
 		elseif state.curr_float.type == "search" then
 			if cursor_info[1] < 2 then
@@ -1178,8 +1278,7 @@ M.open_rfc = function()
 		local cursor_info = vim.api.nvim_win_get_cursor(state.curr_float.win)
 		if cursor_info[1] < 2 then
 		else
-			local new_lines = run_go_plugin({ "view" }, { lines[cursor_info[1]] })
-			add_view(lines[cursor_info[1]], new_lines, false)
+			run_go_plugin({ "view" }, { lines[cursor_info[1]] })
 		end
 	end, {
 		noremap = true, -- Non-recursive
@@ -1284,7 +1383,8 @@ M.open_rfc = function()
 		end
 
 		if state.curr_float.type == "list" then
-			open_list(run_go_plugin({ "list" }, { nil }))
+			run_go_plugin({ "list" }, { nil })
+			open_list({ "Getting rfcs..." })
 		elseif state.curr_float.type == "view_list" then
 			open_view_list()
 		elseif state.curr_float.type == "view" then
@@ -1298,7 +1398,8 @@ M.open_rfc = function()
 		end
 
 		if state.curr_float.type == "list" then
-			open_list(run_go_plugin({ "build-list" }, { nil }))
+			run_go_plugin({ "build-list" }, { nil })
+			open_list({ "Getting rfcs..." })
 		end
 	end)
 end

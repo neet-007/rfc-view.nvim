@@ -287,6 +287,7 @@ func buildRfcListFromDir() error {
 		return err
 	}
 
+	fmt.Printf("Total line count: %d\n", len(names))
 	for _, name := range names {
 		fmt.Println(name)
 	}
