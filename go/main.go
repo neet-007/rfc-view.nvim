@@ -21,6 +21,8 @@ import (
 	"unicode"
 )
 
+// TODO:make a config file
+
 const (
 	SCORE_GAP_LEADING       = -0.005
 	SCORE_GAP_TRAILING      = -0.005
@@ -77,12 +79,15 @@ func (e *RfcExists) Error() string {
 }
 
 var RfcDir string
+var RfcFileExtension string
+
+// TODO: User cannot change this now
+var Compress bool
 
 func init() {
 	RfcDir = getRfcDir()
-	if err := initRfc(); err != nil {
-		log.Fatal(err)
-	}
+	Compress = true
+	RfcFileExtension = ".txt.gz"
 }
 
 func getRfcDir() string {
@@ -113,22 +118,39 @@ func initRfc() error {
 	return nil
 }
 
-func writeToRfc(name string, data io.ReadCloser, writeToList bool) (int, error) {
-	path := filepath.Join(RfcDir, name)
-	f, err := os.Create(path + ".txt.gz")
+func writeToRfc(rfc string, name string, data io.ReadCloser, writeToList bool, writer *gzip.Writer) (int, error) {
+	path := filepath.Join(RfcDir, rfc)
+	f, err := os.Create(path + RfcFileExtension)
 	if err != nil {
 		log.Printf("error creating %s %v\n", path, err)
 		return 0, err
 	}
 
 	defer f.Close()
-	gzWriter := gzip.NewWriter(f)
-	defer gzWriter.Close()
+	var n int64
 
-	n, err := io.Copy(gzWriter, data)
-	if err != nil {
-		log.Printf("error writing to %s %v\n", path, err)
-		return 0, err
+	if Compress {
+		if writer == nil {
+			writer = gzip.NewWriter(f)
+		} else {
+			writer.Reset(f)
+		}
+		defer writer.Close()
+
+		n, err = io.Copy(writer, data)
+		if err != nil {
+			log.Printf("error writing to %s %v\n", path, err)
+			return 0, err
+		}
+	} else {
+		bufferedWriter := bufio.NewWriter(f)
+		defer bufferedWriter.Flush()
+
+		n, err = io.Copy(bufferedWriter, data)
+		if err != nil {
+			log.Printf("error writing to %s: %v\n", path, err)
+			return 0, err
+		}
 	}
 
 	if writeToList {
@@ -200,7 +222,7 @@ func checkRfc(name string) (bool, error) {
 
 func GetRfc(rfc RFC, save bool) (int, error) {
 	if !strings.Contains(rfc.PathName, "::") {
-		return 0, fmt.Errorf("invalid path name %v must contain RFC::TITLE", rfc)
+		return 0, fmt.Errorf("invalid path name %v must contain RFC::TITLE", rfc.Name)
 	}
 
 	ok, err := checkRfc(rfc.PathName)
@@ -221,7 +243,7 @@ func GetRfc(rfc RFC, save bool) (int, error) {
 	}
 
 	if save {
-		n, err := writeToRfc(rfc.PathName, res.Body, true)
+		n, err := writeToRfc(rfc.RFC, rfc.PathName, res.Body, true, nil)
 		if err != nil {
 			return 0, err
 		}
@@ -260,7 +282,7 @@ func buildRfcListFromDir() error {
 			continue
 		}
 
-		names = append(names, strings.TrimSuffix(entry, ".txt.gz"))
+		names = append(names, strings.TrimSuffix(entry, RfcFileExtension))
 	}
 
 	f, err = os.OpenFile(rfcListPath+"_temp.txt", os.O_CREATE|os.O_WRONLY, 0644)
@@ -357,6 +379,7 @@ func compute(s1 string, s2 string, D [][]float64, M [][]float64) {
 	}
 }
 
+// TODO: consider using a pool for the matrix
 func Fzy(filter string, list []string) []string {
 	n := len(filter)
 
@@ -488,9 +511,10 @@ func ListRfc(filter string) {
 	}
 }
 
+// name here is the rfc number
 func ViewRfc(name string) error {
 	path := filepath.Join(RfcDir, name)
-	f, err := os.Open(path + ".txt.gz")
+	f, err := os.Open(path + RfcFileExtension)
 	if err != nil {
 		return err
 	}
@@ -513,9 +537,9 @@ func ViewRfc(name string) error {
 	return nil
 }
 
-func DeleteRfc(name string) error {
-	path := filepath.Join(RfcDir, name)
-	err := os.Remove(path + ".txt.gz")
+func DeleteRfc(rfc string, name string) error {
+	path := filepath.Join(RfcDir, rfc)
+	err := os.Remove(path + RfcFileExtension)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			return err
@@ -673,7 +697,7 @@ func fetchRFCList() ([]RFC, error) {
 	return rfcs, scanner.Err()
 }
 
-func downloadRFC(rfc RFC) error {
+func downloadRFC(rfc RFC, writer *gzip.Writer) error {
 	url := fmt.Sprintf("%s/%s", "https://www.rfc-editor.org/rfc", rfc.Name+".txt")
 
 	ok, err := checkRfc(rfc.PathName)
@@ -690,10 +714,10 @@ func downloadRFC(rfc RFC) error {
 	if resp.StatusCode == 404 {
 		return newNotFound(rfc.RFC)
 	} else if err != nil || resp.StatusCode != 200 {
-		return fmt.Errorf("Failed to fetch RFC %s: %v (%d)\n", rfc, err, resp.StatusCode)
+		return fmt.Errorf("Failed to fetch RFC %v: %v (%d)\n", rfc.Name, err, resp.StatusCode)
 	}
 
-	_, err = writeToRfc(rfc.PathName, resp.Body, false)
+	_, err = writeToRfc(rfc.RFC, rfc.PathName, resp.Body, false, writer)
 	if err != nil {
 		return err
 	}
@@ -710,28 +734,31 @@ func RfcDownloadAll() error {
 	}
 	fmt.Printf("Found %d RFCs\n", len(rfcs))
 
+	jobsCount := 30
 	jobs := make(chan RFC, len(rfcs))
+
 	var wg sync.WaitGroup
 
 	var mu sync.Mutex
 	blackList := make(map[string]bool)
 
-	for i := 0; i < 10; i++ {
+	for i := 0; i < jobsCount; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			writer := gzip.NewWriter(nil)
 			for rfc := range jobs {
-				if err := downloadRFC(rfc); err != nil {
+				if err := downloadRFC(rfc, writer); err != nil {
 					mu.Lock()
 					blackList[rfc.PathName] = true
 					mu.Unlock()
 
 					if _, ok := err.(*NotFound); ok {
-						fmt.Printf("rfc does not exist %s %v\n", rfc, err)
+						fmt.Printf("rfc does not exist %v %v\n", rfc.Name, err)
 					} else if _, ok := err.(*RfcExists); ok {
-						fmt.Printf("rfc already exists %s %v\n", rfc, err)
+						fmt.Printf("rfc already exists %v %v\n", rfc.Name, err)
 					} else {
-						fmt.Printf("failed to download %s %v\n", rfc, err)
+						fmt.Printf("failed to download %v %v\n", rfc.Name, err)
 					}
 				}
 			}
@@ -782,6 +809,8 @@ func RfcDownloadAll() error {
 }
 
 func main() {
+	rfcDir := flag.String("rfc-dir", "", "directory for rfcs")
+
 	rfcSearch := flag.String("rfc", "", "search rfc online by name")
 	rfcSearchOffset := flag.Int("offset", 0, "offset for online search")
 	rfcSave := flag.Bool("save", false, "save rfc")
@@ -796,12 +825,11 @@ func main() {
 
 	flag.Parse()
 
-	if *rfcSearchOffset < 0 {
-		log.Fatal("offset must be >= 0")
+	if *rfcDir != "" {
+		RfcDir = *rfcDir
 	}
-
-	if *rfcSearchOffset > 0 && *rfcSearch == "" {
-		log.Fatal("must provide rfc")
+	if err := initRfc(); err != nil {
+		log.Fatal(err)
 	}
 
 	if *rfcDownloadAllRfc {
@@ -834,7 +862,8 @@ func main() {
 	}
 
 	if *rfcDelete != "" {
-		if err := DeleteRfc(*rfcDelete); err != nil {
+		rfc := strings.Split(*rfcDelete, "::")[0]
+		if err := DeleteRfc(rfc, *rfcDelete); err != nil {
 			log.Fatal(err)
 		}
 
@@ -843,7 +872,7 @@ func main() {
 
 	if *rfcGet != "" {
 		if !strings.Contains(*rfcGet, "::") {
-			log.Fatal("invalid name %s must contain RFC::TITLE", *rfcGet)
+			log.Fatalf("invalid name %s must contain RFC::TITLE", *rfcGet)
 		}
 		split := strings.Split(*rfcGet, "::")
 		rfcNumber := split[0]
@@ -860,7 +889,7 @@ func main() {
 			log.Fatal(err)
 		}
 
-		if err := ViewRfc(*rfcGet); err != nil {
+		if err := ViewRfc(rfc.RFC); err != nil {
 			log.Fatal(err)
 		}
 
@@ -868,11 +897,23 @@ func main() {
 	}
 
 	if *rfcView != "" {
+		if strings.Contains(*rfcView, "::") {
+			*rfcView = strings.Split(*rfcView, "::")[0]
+		}
+
 		if err := ViewRfc(*rfcView); err != nil {
 			log.Fatal(err)
 		}
 
 		return
+	}
+
+	if *rfcSearchOffset < 0 {
+		log.Fatal("offset must be >= 0")
+	}
+
+	if *rfcSearchOffset > 0 && *rfcSearch == "" {
+		log.Fatal("must provide rfc")
 	}
 
 	if *rfcSearch == "" {
