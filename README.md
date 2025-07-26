@@ -167,7 +167,7 @@ The fuzzy search logic implemented in rfc-view.nvim is a go port from telescope.
 
 ## Changelog
 
-  * **0.1.0** (YYYY-MM-DD)
+  * **0.1.0** (2025-07-26)
 
       * Initial release.
       * Core functionality for RFC fetching, viewing, and basic management.
