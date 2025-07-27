@@ -10,8 +10,7 @@ CONTENTS                                                *rfc-view-contents*
     4. Commands...........................|rfc-view-commands|
     5. Functions..........................|rfc-view-functions|
     6. Keymaps............................|rfc-view-keymaps|
-    7. Troubleshooting....................|rfc-view-troubleshooting|
-    8. Changelog..........................|rfc-view-changelog|
+    7. Changelog..........................|rfc-view-changelog|
 
 ==============================================================================
 1. INTRODUCTION                                         *rfc-view-introduction*
@@ -35,6 +34,7 @@ https://github.com/neet-007/rfc-view.nvim
 2. INSTALLATION                                         *rfc-view-installation*
 
 This plugin requires Neovim 0.7.0 or a more recent version.
+This plugin requires Go 1.21 or a more recent version.
 
 Using |lazy.nvim|:
 >lua
@@ -198,29 +198,10 @@ Example global keymaps (as seen in |rfc-view-installation|):
       { '<leader>rc', function() require('rfcview').close_rfc() end, desc = '[R]FC [C]lose All Windows' },
     },
 <
-
 ------------------------------------------------------------------------------
-7. TROUBLESHOOTING                                      *rfc-view-troubleshooting*
+7. CHANGELOG                                            *rfc-view-changelog*
 
-* **"RFC not found" or Network Errors:**
-    * Check your internet connection.
-    * Verify the RFC number is valid.
-    * Confirm that the `base_url` setting in your configuration is correct and accessible.
-
-* **RFC content doesn't appear formatted correctly:**
-    * Ensure your `on_open_hook` (if custom) is properly setting the buffer's filetype (e.g., to `rfc`).
-    * You might need a syntax file for the `rfc` filetype. Consider installing
-        a plugin that provides this, or create your own.
-        (e.g., a simple `syntax/rfc.vim` file can be placed in `~/.config/nvim/after/syntax/`)
-
-* **Cache issues:**
-    * If you suspect cached RFCs are outdated or corrupted, you can manually
-        clear the cache directory specified in the `cache_dir` option.
-
-------------------------------------------------------------------------------
-8. CHANGELOG                                            *rfc-view-changelog*
-
-* **0.1.0** (YYYY-MM-DD)
+* **0.1.0** (2025-07-26)
     * Initial release.
     * Core functionality for RFC fetching, viewing, and basic management.
     * Introduced configuration options for `keys` and `delete_buffers_when_closing`.

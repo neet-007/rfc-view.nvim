@@ -22,6 +22,7 @@ Download, view, and search RFCs right from within Neovim.
 ## Installation
 
 This plugin requires **Neovim 0.7.0 or a more recent version**.
+This plugin requires **Go 1.21 or a more recent version**.
 
 You can install `rfc-view.nvim` using your preferred Neovim plugin manager.
 
@@ -82,8 +83,25 @@ use {
 }
 
 -- Remember to define your global keymaps separately if using Packer:
--- vim.keymap.set('n', '<leader>ro', function() require('rfcview').open_rfc() end, { desc = '[R]FC [O]pen Main Window' })
--- vim.keymap.set('n', '<leader>rc', function() require('rfcview').close_rfc() end, { desc = '[R]FC [C]lose All Windows' })
+-- Example:
+--[[
+local status_ok, rfcview = pcall(require, "rfcview")
+if not status_ok then
+	print("Error: Could not require 'rfcview'.")
+end
+
+vim.keymap.set("n", "<leader>ro", function()
+	if status_ok and type(rfcview.open_rfc) == "function" then
+		rfcview.open_rfc()
+	end
+end, { desc = "Open RFC plugin" })
+
+vim.keymap.set("n", "<leader>rc", function()
+	if status_ok and type(rfcview.close_rfc) == "function" then
+		rfcview.close_rfc()
+	end
+end, { desc = "Close RFC plugin" })
+--]]
 ```
 
 -----
@@ -136,20 +154,6 @@ require('rfcview').setup({
   rfc_dir = "PATH"
 })
 ```
-
------
-
-## Troubleshooting
-
-  * **"RFC not found" or Network Errors:**
-      * Ensure your internet connection is active.
-      * Double-check that the RFC number you entered is valid.
-      * Confirm that the `base_url` setting in your plugin configuration points to a correct and accessible RFC repository (e.g., `https://www.rfc-editor.org/rfc/rfc`).
-  * **RFC content doesn't look formatted correctly:**
-      * If you're using a custom `on_open_hook`, make sure it's correctly setting the buffer's filetype (e.g., to `rfc`).
-      * You might need a syntax file for the `rfc` filetype. Consider installing a plugin that provides `rfc` syntax highlighting, or create a simple `syntax/rfc.vim` file in your Neovim configuration directory (e.g., `~/.config/nvim/after/syntax/`).
-  * **Cache issues:**
-      * If you suspect your locally cached RFCs are outdated or corrupted, you can manually clear the cache directory. The default location is `vim.fn.stdpath('data') .. '/rfcview_cache'` (or the path specified by your `cache_dir` option).
 
 -----
 
