@@ -11,7 +11,7 @@ Download, view, and search RFCs right from within Neovim.
 ---
 
 ## Features
-* Retrieve and display RFCs by name or number.
+* Retrieve and display RFCs by name or number, prefix search with 'rfc:$NUMBER' to serach by rfc number.
 * Download specific RFCs.
 * Download all RFCs from the IETF RFC Editor website at once.
 * Cache RFCs as neovim buffers.
@@ -176,3 +176,6 @@ The fuzzy search logic implemented in rfc-view.nvim is a go port from telescope.
       * Initial release.
       * Core functionality for RFC fetching, viewing, and basic management.
       * Introduced configuration options for `keys` and `delete_buffers_when_closing`.
+
+  * **0.2.0** (2025-08-2)
+      *  Added support for RFC search by rfc number.

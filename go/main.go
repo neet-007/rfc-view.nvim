@@ -171,12 +171,22 @@ func writeToRfc(rfc string, name string, data io.ReadCloser, writeToList bool, w
 }
 
 func SearchRFCs(query string, offset int) (*RFCResponse, error) {
-	encodedQuery := url.QueryEscape(query)
-	apiURL := fmt.Sprintf(
-		"https://datatracker.ietf.org/api/v1/doc/document/?format=json&type=rfc&title__icontains=%s&offset=%d",
-		encodedQuery,
-		offset,
-	)
+	var apiURL string
+	if strings.HasPrefix(query, "rfc:") {
+		encodedQuery := url.QueryEscape(strings.TrimPrefix(query, "rfc:"))
+		apiURL = fmt.Sprintf(
+			"https://datatracker.ietf.org/api/v1/doc/document/?format=json&type=rfc&name__startswith=rfc%s&offset=%d",
+			encodedQuery,
+			offset,
+		)
+	} else {
+		encodedQuery := url.QueryEscape(query)
+		apiURL = fmt.Sprintf(
+			"https://datatracker.ietf.org/api/v1/doc/document/?format=json&type=rfc&title__icontains=%s&offset=%d",
+			encodedQuery,
+			offset,
+		)
+	}
 
 	resp, err := http.Get(apiURL)
 	defer resp.Body.Close()
@@ -811,7 +821,7 @@ func RfcDownloadAll() error {
 func main() {
 	rfcDir := flag.String("rfc-dir", "", "directory for rfcs")
 
-	rfcSearch := flag.String("rfc", "", "search rfc online by name")
+	rfcSearch := flag.String("rfc", "", "search rfc online by name or number")
 	rfcSearchOffset := flag.Int("offset", 0, "offset for online search")
 	rfcSave := flag.Bool("save", false, "save rfc")
 	rfcList := flag.Bool("list", false, "view rfc list")

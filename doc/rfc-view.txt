@@ -21,7 +21,7 @@ search RFCs, whether locally cached or retrieved directly from the IETF RFC
 Editor website, and then open them as Neovim buffers.
 
 Features include:
-- Retrieve and display RFCs by name or number.
+- Retrieve and display RFCs by name or number, prefix search with 'rfc:$NUMBER' to serach by rfc number.
 - Download specific RFCs.
 - Download all RFCs from the IETF RFC Editor website at once.
 - Cache RFCs as neovim buffers.
@@ -205,6 +205,9 @@ Example global keymaps (as seen in |rfc-view-installation|):
     * Initial release.
     * Core functionality for RFC fetching, viewing, and basic management.
     * Introduced configuration options for `keys` and `delete_buffers_when_closing`.
+
+* **0.2.0** (2025-08-2)
+    *  Added support for RFC search by rfc number.
 
 ==============================================================================
 vim:tw=78:ts=8:ft=help:norl:
